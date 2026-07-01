@@ -118,6 +118,7 @@ interface Ingredient {
   netWeight: number;      // Net weight in kg (น้ำหนักสุทธิ)
   totalPurchasePrice: number; // Total purchase price in THB (ราคาซื้อรวม)
   date: string;           // Recorded date (YYYY-MM-DD)
+  notes?: string;         // บันทึกเพิ่มเติม (Notes)
 }
 
 // Initial default ingredients for a rich starting experience
@@ -129,7 +130,8 @@ const INITIAL_INGREDIENTS: Ingredient[] = [
     grossWeight: 5.0,
     netWeight: 3.6,
     totalPurchasePrice: 2200,
-    date: "2026-06-15"
+    date: "2026-06-15",
+    notes: "สั่งซื้อจากซัพพลายเออร์นำเข้าโดยตรง สภาพสดมาก มีเศษไขมันส่วนเกินเล็กน้อย"
   }
 ];
 
@@ -187,6 +189,16 @@ export default function App() {
   const [supabaseSession, setSupabaseSession] = useState<SupabaseSession | null>(null);
   const [isSupabaseSyncing, setIsSupabaseSyncing] = useState<boolean>(false);
 
+  // --- LINE Messaging API config state ---
+  const [lineChannelAccessToken, setLineChannelAccessToken] = useState<string>(() => {
+    return safeLocalStorage.getItem("line_channel_access_token") || "";
+  });
+  const [lineRecipientId, setLineRecipientId] = useState<string>(() => {
+    return safeLocalStorage.getItem("line_recipient_id") || "";
+  });
+  const [showLineConfig, setShowLineConfig] = useState<boolean>(false);
+  const [isSendingLine, setIsSendingLine] = useState<boolean>(false);
+
   // --- Auth States ---
   const [currentUser, setCurrentUser] = useState<string | null>(() => {
     return safeLocalStorage.getItem("smart_yield_pro_session") || "admin";
@@ -216,6 +228,7 @@ export default function App() {
   const [date, setDate] = useState(() => {
     return new Date().toISOString().split("T")[0];
   });
+  const [notes, setNotes] = useState("");
 
   // --- Calculator Keypad Popup States ---
   const [showCalculator, setShowCalculator] = useState<boolean>(false);
@@ -227,6 +240,7 @@ export default function App() {
     setGrossWeight("");
     setNetWeight("");
     setTotalPurchasePrice("");
+    setNotes("");
     setEditingId(null);
   };
 
@@ -391,6 +405,7 @@ export default function App() {
   const [showNetTooltip, setShowNetTooltip] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
   const [hoveredBarIndex, setHoveredBarIndex] = useState<number | null>(null);
+  const [isChartCollapsed, setIsChartCollapsed] = useState(true);
 
   // --- Dynamic Supabase Initialization & Session Handler ---
   useEffect(() => {
@@ -537,7 +552,8 @@ export default function App() {
           grossWeight: Number(d.gross_weight) || 0,
           netWeight: Number(d.net_weight) || 0,
           totalPurchasePrice: Number(d.total_purchase_price) || 0,
-          date: d.date || ""
+          date: d.date || "",
+          notes: d.notes || ""
         }));
         setIngredients(items.length > 0 ? items : INITIAL_INGREDIENTS);
       }
@@ -964,6 +980,7 @@ export default function App() {
           net_weight: net,
           total_purchase_price: purchase,
           date,
+          notes: notes.trim(),
           user_id: supabaseSession.user.id
         };
 
@@ -998,7 +1015,7 @@ export default function App() {
         setIngredients(prev => 
           prev.map(item => 
             item.id === editingId 
-              ? { ...item, name: trimmedName, category, grossWeight: gross, netWeight: net, totalPurchasePrice: purchase, date }
+              ? { ...item, name: trimmedName, category, grossWeight: gross, netWeight: net, totalPurchasePrice: purchase, date, notes: notes.trim() }
               : item
           )
         );
@@ -1013,7 +1030,8 @@ export default function App() {
           grossWeight: gross,
           netWeight: net,
           totalPurchasePrice: purchase,
-          date
+          date,
+          notes: notes.trim()
         };
         setIngredients(prev => [newItem, ...prev]);
         showToast(`บันทึกวัตถุดิบ "${trimmedName}" เรียบร้อยแล้ว`, "success");
@@ -1032,6 +1050,7 @@ export default function App() {
     setNetWeight(item.netWeight.toString());
     setTotalPurchasePrice(item.totalPurchasePrice.toString());
     setDate(item.date);
+    setNotes(item.notes || "");
     
     // Smooth scroll to form
     const formElement = document.getElementById("ingredient-form-section");
@@ -1222,7 +1241,8 @@ export default function App() {
       "ราคาซื้อต่อกก. (บาท)",
       "ต้นทุนจริงต่อกก. (บาท)",
       "มูลค่าความสูญเสีย (บาท)",
-      "วันที่บันทึก"
+      "วันที่บันทึก",
+      "บันทึกเพิ่มเติม"
     ];
 
     const rows = processedIngredients.map(item => {
@@ -1239,7 +1259,8 @@ export default function App() {
         purchasePricePerKg.toFixed(2),
         realCostPerKg.toFixed(2),
         lossValue.toFixed(2),
-        item.date
+        item.date,
+        `"${(item.notes || "").replace(/"/g, '""')}"`
       ];
     });
 
@@ -1254,6 +1275,66 @@ export default function App() {
     link.click();
     document.body.removeChild(link);
     showToast("ดาวน์โหลดไฟล์รายงาน CSV เรียบร้อยแล้ว", "success");
+  };
+
+  // --- Send Summary to LINE via Express proxy ---
+  const handleSendLineSummary = async () => {
+    if (processedIngredients.length === 0) {
+      showToast("ไม่มีข้อมูลวัตถุดิบที่คัดกรองอยู่เพื่อทำการส่งสรุปผล", "error");
+      return;
+    }
+
+    setIsSendingLine(true);
+    try {
+      // Find month text or fallback
+      const activeMonthObj = uniqueMonths.find(m => m.key === filterMonth);
+      const activeMonthLabel = activeMonthObj ? activeMonthObj.label : "ทั้งหมดทุกเดือน";
+
+      const payload = {
+        channelAccessToken: lineChannelAccessToken,
+        recipientId: lineRecipientId,
+        analyticsSummary,
+        filterDetails: {
+          month: activeMonthLabel,
+          name: filterName,
+          search: searchQuery
+        },
+        ingredientsCount: processedIngredients.length,
+        timestamp: new Date().toLocaleString("th-TH", {
+          year: "numeric",
+          month: "long",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          timeZone: "Asia/Bangkok"
+        })
+      };
+
+      const response = await fetch("/api/send-line", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const result = await response.json();
+      if (!response.ok) {
+        // Automatically reveal the settings panel so the user can easily see where to configure the keys!
+        if (result.error && (result.error.includes("Token") || result.error.includes("ผู้รับ"))) {
+          setShowLineConfig(true);
+        }
+        throw new Error(result.error || "เกิดข้อผิดพลาดในการส่งข้อมูลเข้า LINE");
+      }
+
+      showToast(result.message || "ส่งสรุปผลเข้า LINE สำเร็จเรียบร้อย!", "success");
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || "ไม่สามารถส่งข้อมูลได้ กรุณาตรวจสอบ LINE Token หรือการตั้งค่าอินเทอร์เน็ต", "error");
+    } finally {
+      setIsSendingLine(false);
+    }
   };
 
   return (
@@ -1290,210 +1371,41 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Modern Bento Top Header */}
-      <header className="mb-6 flex flex-col xl:flex-row justify-between items-start xl:items-end gap-4 border-b border-slate-200 pb-5">
-        <div className="flex flex-col"> 
-          <div className="flex items-center gap-2">
-            <div className="h-9 w-9 bg-slate-900 text-white rounded-lg flex items-center justify-center font-black animate-none">Y</div>
-            <h1 className="text-2xl font-black tracking-tight uppercase text-slate-900">
-              Smart Yield & Cost Tracker Pro
+      {/* Modern Compact Header */}
+      <header className="mb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-slate-100 pb-3">
+        <div className="flex items-center gap-2">
+          <div className="h-8 w-8 bg-slate-900 text-white rounded-lg flex items-center justify-center font-black text-sm">Y</div>
+          <div>
+            <h1 className="text-base font-black tracking-tight uppercase text-slate-900 leading-none">
+              Smart Yield Pro
             </h1>
+            <p className="text-slate-400 text-[10px] font-medium tracking-wide mt-0.5">
+              ระบบวิเคราะห์ผลผลิต & คำนวณต้นทุนวัตถุดิบอาหารและขนม
+            </p>
           </div>
-          <p className="text-slate-500 text-sm font-serif italic mt-1 leading-none">
-            ระบบคำนวณและวิเคราะห์ต้นทุนวัตถุดิบอัจฉริยะสำหรับผู้ประกอบการร้านอาหารและร้านขนม
-          </p>
         </div>
         
-        <div className="flex flex-wrap gap-2 text-xs font-mono w-full xl:w-auto items-center"> 
-          {/* Active User session profile */}
-          <div className="bg-white border border-slate-200 px-4 py-2 rounded shadow-xs flex items-center gap-2"> 
-            <User className="w-4 h-4 text-blue-500" />
-            <div>
-              <span className="text-slate-400 block uppercase text-[8px] tracking-wider font-bold">Active User</span> 
-              <span className="font-bold text-slate-800">{currentUser}</span> 
-            </div>
-          </div> 
+        <div className="flex items-center gap-2 text-xs">
+          {/* Storage Mode Badge */}
+          <span className="text-[9px] font-bold uppercase px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-600 font-mono flex items-center gap-1">
+            <span className={`h-1.5 w-1.5 rounded-full ${isSupabaseActive ? "bg-emerald-500" : "bg-blue-500"}`}></span>
+            {isSupabaseActive ? "SUPABASE ONLINE" : "LOCAL STORAGE"}
+          </span>
 
-          <div className="bg-white border border-slate-200 px-4 py-2 rounded shadow-xs flex items-center gap-2"> 
-            <Calendar className="w-4 h-4 text-slate-400" />
-            <div>
-              <span className="text-slate-400 block uppercase text-[8px] tracking-wider font-bold">Today</span> 
-              <span className="font-bold text-slate-800">01 ก.ค. 2569</span> 
-            </div>
-          </div> 
-          <div className="bg-slate-900 text-white px-4 py-2 rounded shadow-xs flex items-center gap-2"> 
-            <Database className="w-4 h-4 text-slate-400" />
-            <div>
-              <span className="text-slate-400 block uppercase text-[8px] tracking-wider font-bold">Persistence</span> 
-              <span className="font-bold text-slate-100 uppercase">
-                {isSupabaseActive ? "SUPABASE ONLINE" : isSupabaseEnabled ? "SUPABASE SETUP" : "LOCAL STORAGE"}
-              </span> 
-            </div>
-          </div>
+          {/* Quick Help Guide Button */}
+          <button
+            onClick={() => setShowHelp(true)}
+            className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-slate-800 transition flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider cursor-pointer border border-slate-200/50"
+            title="ดูคู่มือและสูตรคำนวณ"
+          >
+            <HelpCircle className="w-3.5 h-3.5" />
+            <span>คู่มือระบบ</span>
+          </button>
         </div>
       </header>
 
-      {/* Tab Switcher */}
-      <div className="flex gap-2 mb-6 bg-slate-100 p-1 rounded-xl max-w-md">
-        <button
-          onClick={() => setActiveTab("dashboard")}
-          className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer ${
-            activeTab === "dashboard"
-              ? "bg-white text-slate-900 shadow-sm"
-              : "text-slate-500 hover:text-slate-700"
-          }`}
-        >
-          <TrendingUp className="w-4 h-4 text-blue-500" />
-          วิเคราะห์และคำนวณแดชบอร์ด
-        </button>
-        <button
-          onClick={() => setActiveTab("admin")}
-          className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer ${
-            activeTab === "admin"
-              ? "bg-white text-slate-900 shadow-sm"
-              : "text-slate-500 hover:text-slate-700"
-          }`}
-        >
-          <Settings className="w-4 h-4 text-emerald-500" />
-          ตั้งค่าระบบ/จัดการสมาชิก
-        </button>
-      </div>
-
-      {activeTab === "dashboard" ? (
-        /* Bento Layout Grid */
-        <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
-        
-        {/* TOP METRIC BENTO BLOCKS (Full width on top) */}
-        <div className="col-span-12 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          
-          {/* Box 1: Average Yield */}
-          <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-xs flex flex-col justify-between hover:border-slate-300 transition-colors relative group">
-            <div>
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1">Average Yield</span>
-              <p className="text-xs text-slate-400 font-serif italic">อัตราส่วนผลผลิตเฉลี่ยของวัตถุดิบที่เปิดกรอง</p>
-            </div>
-            <div className="mt-4 flex items-baseline gap-2">
-              <span className="text-4xl font-mono font-bold text-blue-600">
-                {analyticsSummary.avgYield.toFixed(1)}
-              </span>
-              <span className="text-lg text-blue-600 font-bold font-mono">%</span>
-            </div>
-          </div>
-
-          {/* Box 2: Total Loss Weight */}
-          <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-xs flex flex-col justify-between hover:border-slate-300 transition-colors relative group">
-            <div>
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1">Total Loss Weight</span>
-              <p className="text-xs text-slate-400 font-serif italic">ปริมาณขยะ/ของเสียหลังแต่งกิ่งตัดแต่งรวม</p>
-            </div>
-            <div className="mt-4 flex items-baseline gap-2 text-amber-600">
-              <span className="text-4xl font-mono font-bold">
-                {analyticsSummary.totalLossWeight.toFixed(2)}
-              </span>
-              <span className="text-sm font-bold font-mono">KG</span>
-            </div>
-          </div>
-
-          {/* Box 3: Total Loss Value */}
-          <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-xs flex flex-col justify-between hover:border-slate-300 transition-colors relative group">
-            <div>
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1">Total Loss Value</span>
-              <p className="text-xs text-slate-400 font-serif italic">มูลค่าเสียหายที่ต้องทิ้งไปโดยเปล่าประโยชน์</p>
-            </div>
-            <div className="mt-4 flex items-baseline gap-2 text-rose-600">
-              <span className="text-4xl font-mono font-bold">
-                {analyticsSummary.totalLossValue.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </span>
-              <span className="text-xs font-bold font-mono">THB</span>
-            </div>
-          </div>
-
-          {/* Box 4: Efficiency Stats (Dark Theme Bento Block) */}
-          <div className="bg-slate-900 text-white p-5 rounded-2xl shadow-xs relative overflow-hidden flex flex-col justify-between group">
-            <div className="relative z-10">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1">Efficiency Status</span>
-              <div className="mt-2.5">
-                <p className="text-xl font-mono font-bold text-emerald-400 tracking-tight">
-                  {analyticsSummary.avgYield >= 80 ? "🔥 HIGH PERFORMANCE" : analyticsSummary.avgYield >= 65 ? "👍 STANDARD YIELD" : "⚠️ LOW EFFICIENCY"}
-                </p>
-                <p className="text-xs text-slate-300 font-serif italic mt-1 leading-relaxed">
-                  มีรายการที่คงค่าระดับผลผลิตสูงสูงสุดถึง {analyticsSummary.optimizedCount} รายการ จากที่กรองทั้งหมด
-                </p>
-              </div>
-            </div>
-            <div className="absolute bottom-0 right-0 opacity-10 font-black text-8xl -mb-10 -mr-4 select-none pointer-events-none font-mono">
-              YIELD
-            </div>
-          </div>
-
-        </div>
-
-        {/* HISTORICAL CHART BENTO BOX (Span 12) */}
-        <div className="col-span-12 bg-white border border-slate-200 p-6 rounded-2xl shadow-xs">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4 border-b border-slate-100 pb-3">
-            <div>
-              <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
-                <TrendingDown className="w-4 h-4 text-rose-500" />
-                Historical Loss Value (6-Months Analysis)
-              </h3>
-              <p className="text-xs text-slate-400 font-serif italic">
-                วิเคราะห์มูลค่าที่เสียเปล่าจากขั้นตอนเตรียมและตัดแต่งวัตถุดิบย้อนหลัง 6 เดือนล่าสุด
-              </p>
-            </div>
-            <div className="text-[10px] font-mono bg-slate-100 px-3 py-1 rounded text-slate-600 border border-slate-200">
-              {filterName === "all" ? "วัตถุดิบ: ทั้งหมด" : `วัตถุดิบเฉพาะ: ${filterName}`}
-            </div>
-          </div>
-
-          {/* Custom Responsive SVG Chart */}
-          <div className="w-full h-44 flex items-end justify-between px-2 sm:px-6 pt-6 pb-2 font-mono">
-            {chartData.map((d, index) => {
-              const percentage = maxChartValue > 0 ? (d.value / maxChartValue) * 80 : 0; // scale max height to 80%
-              const displayHeight = Math.max(3, percentage); // minimum 3% height for visibility
-
-              return (
-                <div 
-                  key={index} 
-                  className="flex-1 flex flex-col items-center gap-2 group/bar relative"
-                  onMouseEnter={() => setHoveredBarIndex(index)}
-                  onMouseLeave={() => setHoveredBarIndex(null)}
-                >
-                  {/* Tooltip on hover */}
-                  <div 
-                    className={`absolute bottom-[calc(100%+10px)] bg-slate-900 text-white text-[10px] py-1 px-2 rounded shadow-md z-20 pointer-events-none transition-all duration-150 ${
-                      hoveredBarIndex === index ? "opacity-100 translate-y-0" : "opacity-0 translate-y-1"
-                    }`}
-                  >
-                    ฿{d.value.toLocaleString("th-TH", { minimumFractionDigits: 2 })}
-                  </div>
-
-                  {/* Bar block container */}
-                  <div className="w-12 sm:w-16 bg-slate-50 rounded-md border border-slate-100 h-28 flex items-end relative overflow-hidden">
-                    {/* Active filling bar */}
-                    <motion.div 
-                      className={`w-full rounded-b-md transition-all duration-300 ${
-                        d.value > 0 ? "bg-gradient-to-t from-rose-500 to-rose-400 group-hover/bar:from-rose-600 group-hover/bar:to-rose-500" : "bg-slate-200"
-                      }`}
-                      initial={{ height: 0 }}
-                      animate={{ height: `${displayHeight}%` }}
-                      transition={{ duration: 0.6, delay: index * 0.05 }}
-                    />
-                  </div>
-
-                  {/* Value overlay for small screens or hover */}
-                  <span className="text-[10px] font-bold text-slate-800">
-                    ฿{d.value > 1000 ? `${(d.value / 1000).toFixed(1)}k` : d.value.toFixed(0)}
-                  </span>
-
-                  {/* Label Month */}
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tight">
-                    {d.label}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+      {/* Main Layout Grid */}
+      <div className="grid grid-cols-12 gap-5 flex-1 min-h-0">
 
         {/* LEFT COLUMN: INGREDIENT ENTRY (Span 4) */}
         <aside className="col-span-12 lg:col-span-4" id="ingredient-form-section">
@@ -1625,21 +1537,26 @@ export default function App() {
                         </AnimatePresence>
                       </div>
                     </div>
-                    <input
-                      type="text"
-                      inputMode="none"
-                      readOnly
-                      required
-                      value={grossWeight}
-                      onClick={() => openCalculator("grossWeight")}
-                      onFocus={(e) => {
-                        e.preventDefault();
-                        e.target.blur();
-                        openCalculator("grossWeight");
-                      }}
-                      placeholder="0.00"
-                      className="w-full border-b border-slate-200 focus:border-slate-900 rounded-none py-1.5 px-0 outline-none text-sm font-mono transition-colors bg-transparent font-semibold focus:ring-0 focus:outline-none cursor-pointer text-slate-800"
-                    />
+                    <div className="relative flex items-center gap-1 border-b border-slate-200 focus-within:border-slate-950 transition-colors">
+                      <input
+                        type="number"
+                        step="any"
+                        min="0"
+                        required
+                        value={grossWeight}
+                        onChange={(e) => setGrossWeight(e.target.value)}
+                        placeholder="0.00"
+                        className="w-full py-1.5 outline-none text-sm font-mono bg-transparent font-semibold text-slate-800"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => openCalculator("grossWeight")}
+                        className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700 transition"
+                        title="เปิดเครื่องคิดเลขช่วยคำนวณ"
+                      >
+                        <Calculator className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
 
                   <div className="space-y-1.5 relative">
@@ -1680,21 +1597,26 @@ export default function App() {
                         </AnimatePresence>
                       </div>
                     </div>
-                    <input
-                      type="text"
-                      inputMode="none"
-                      readOnly
-                      required
-                      value={netWeight}
-                      onClick={() => openCalculator("netWeight")}
-                      onFocus={(e) => {
-                        e.preventDefault();
-                        e.target.blur();
-                        openCalculator("netWeight");
-                      }}
-                      placeholder="0.00"
-                      className="w-full border-b border-slate-200 focus:border-slate-900 rounded-none py-1.5 px-0 outline-none text-sm font-mono transition-colors bg-transparent font-semibold focus:ring-0 focus:outline-none cursor-pointer text-slate-800"
-                    />
+                    <div className="relative flex items-center gap-1 border-b border-slate-200 focus-within:border-slate-950 transition-colors">
+                      <input
+                        type="number"
+                        step="any"
+                        min="0"
+                        required
+                        value={netWeight}
+                        onChange={(e) => setNetWeight(e.target.value)}
+                        placeholder="0.00"
+                        className="w-full py-1.5 outline-none text-sm font-mono bg-transparent font-semibold text-slate-800"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => openCalculator("netWeight")}
+                        className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700 transition"
+                        title="เปิดเครื่องคิดเลขช่วยคำนวณ"
+                      >
+                        <Calculator className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -1711,26 +1633,47 @@ export default function App() {
                 <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
                   ราคาซื้อรวมทั้งหมด (บาท) <span className="text-rose-500">*</span>
                 </label>
-                <div className="relative">
-                  <span className="absolute left-0 bottom-2.5 text-slate-300 font-bold text-sm">฿</span>
+                <div className="relative flex items-center gap-1 border-b-2 border-slate-100 focus-within:border-slate-900 transition-colors">
+                  <span className="text-slate-400 font-bold text-sm">฿</span>
                   <input
-                    type="text"
-                    inputMode="none"
-                    readOnly
+                    type="number"
+                    step="any"
+                    min="0"
                     required
                     value={totalPurchasePrice}
-                    onClick={() => openCalculator("totalPurchasePrice")}
-                    onFocus={(e) => {
-                      e.preventDefault();
-                      e.target.blur();
-                      openCalculator("totalPurchasePrice");
-                    }}
+                    onChange={(e) => setTotalPurchasePrice(e.target.value)}
                     placeholder="0.00"
-                    className="w-full border-b-2 border-slate-100 focus:border-slate-900 pl-4 py-2 outline-none text-sm font-mono transition-colors bg-transparent font-semibold cursor-pointer text-slate-800"
+                    className="w-full py-1.5 outline-none text-sm font-mono bg-transparent font-semibold text-slate-800 pl-1"
                   />
+                  <button
+                    type="button"
+                    onClick={() => openCalculator("totalPurchasePrice")}
+                    className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-700 transition"
+                    title="เปิดเครื่องคิดเลขช่วยคำนวณ"
+                  >
+                    <Calculator className="w-3.5 h-3.5" />
+                  </button>
                 </div>
                 <span className="text-[9px] text-slate-400 block mt-0.5">
                   * ใส่ราคาทั้งหมดที่คุณจ่ายเพื่อซื้อล็อตวัตถุดิบนี้มา
+                </span>
+              </div>
+
+              {/* Notes Field */}
+              <div className="space-y-1.5">
+                <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
+                  บันทึกเพิ่มเติม (Notes)
+                </label>
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="เช่น สั่งซื้อจากฟาร์มโชคชัย, แหล่งที่มา, สภาพวัตถุดิบ..."
+                  className="w-full border border-slate-200 focus:border-slate-900 rounded-lg p-2 outline-none text-xs transition-colors bg-transparent placeholder:text-slate-300 font-medium"
+                  rows={2}
+                  maxLength={500}
+                />
+                <span className="text-[9px] text-slate-400 block mt-0.5">
+                  * จดหมายเหตุเกี่ยวกับสภาพวัตถุดิบหรือแหล่งที่มา
                 </span>
               </div>
 
@@ -1809,9 +1752,136 @@ export default function App() {
 
         {/* RIGHT COLUMN: RECORDED DATA TABLE & FILTERS (Span 8) */}
         <main className="col-span-12 lg:col-span-8 flex flex-col gap-4 min-h-0">
-          
+
+          {/* Compact Metrics Row */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs grid grid-cols-2 md:grid-cols-4 gap-3 divide-y md:divide-y-0 md:divide-x divide-slate-100">
+            {/* Metric 1: Avg Yield */}
+            <div className="flex flex-col justify-center">
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block font-mono">Average Yield</span>
+              <div className="flex items-baseline gap-0.5 mt-0.5">
+                <span className="text-xl font-mono font-black text-blue-600">
+                  {analyticsSummary.avgYield.toFixed(1)}
+                </span>
+                <span className="text-[10px] text-blue-600 font-bold font-mono">%</span>
+              </div>
+            </div>
+
+            {/* Metric 2: Total Loss Weight */}
+            <div className="flex flex-col justify-center pt-2 md:pt-0 md:pl-3">
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block font-mono">Loss Weight</span>
+              <div className="flex items-baseline gap-0.5 mt-0.5 text-amber-600">
+                <span className="text-xl font-mono font-black">
+                  {analyticsSummary.totalLossWeight.toFixed(2)}
+                </span>
+                <span className="text-[9px] font-bold font-mono">KG</span>
+              </div>
+            </div>
+
+            {/* Metric 3: Total Loss Value */}
+            <div className="flex flex-col justify-center pt-2 md:pt-0 md:pl-3">
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block font-mono">Loss Value</span>
+              <div className="flex items-baseline gap-0.5 mt-0.5 text-rose-600">
+                <span className="text-xl font-mono font-black">
+                  ฿{analyticsSummary.totalLossValue.toLocaleString("th-TH", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+            </div>
+
+            {/* Metric 4: Efficiency Stats */}
+            <div className="flex flex-col justify-center pt-2 md:pt-0 md:pl-3">
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block font-mono">Efficiency</span>
+              <div className="mt-1 flex items-center">
+                <span className={`text-[9px] font-black font-mono px-2 py-0.5 rounded-full border ${
+                  analyticsSummary.avgYield >= 80 
+                    ? "bg-emerald-50 text-emerald-700 border-emerald-200" 
+                    : analyticsSummary.avgYield >= 65 
+                    ? "bg-blue-50 text-blue-700 border-blue-200" 
+                    : "bg-amber-50 text-amber-700 border-amber-200"
+                }`}>
+                  {analyticsSummary.avgYield >= 80 ? "HIGH" : analyticsSummary.avgYield >= 65 ? "STANDARD" : "LOW"}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Collapsible Chart Panel */}
+          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+            <button
+              type="button"
+              onClick={() => setIsChartCollapsed(!isChartCollapsed)}
+              className="w-full flex items-center justify-between px-4 py-2 bg-slate-50/50 hover:bg-slate-50 transition-colors border-b border-slate-100 text-left outline-none cursor-pointer"
+            >
+              <div className="flex items-center gap-2">
+                <TrendingDown className="w-3.5 h-3.5 text-rose-500" />
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-700 font-mono">
+                  สถิติมูลค่าความสูญเสียรายเดือน (Monthly Loss Analysis)
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-[9px] text-slate-400 font-bold uppercase font-mono">
+                  {isChartCollapsed ? "แสดงกราฟ" : "ซ่อนกราฟ"}
+                </span>
+                <ChevronRight className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-300 ${isChartCollapsed ? "" : "rotate-90"}`} />
+              </div>
+            </button>
+            
+            <AnimatePresence initial={false}>
+              {!isChartCollapsed && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.25, ease: "easeInOut" }}
+                >
+                  <div className="p-4 pt-1 bg-white">
+                    {/* Custom Compact SVG Chart */}
+                    <div className="w-full h-28 flex items-end justify-between px-2 sm:px-4 pt-4 pb-1 font-mono">
+                      {chartData.map((d, index) => {
+                        const percentage = maxChartValue > 0 ? (d.value / maxChartValue) * 80 : 0;
+                        const displayHeight = Math.max(3, percentage);
+                        return (
+                          <div 
+                            key={index} 
+                            className="flex-1 flex flex-col items-center gap-1 group/bar relative"
+                            onMouseEnter={() => setHoveredBarIndex(index)}
+                            onMouseLeave={() => setHoveredBarIndex(null)}
+                          >
+                            <div 
+                              className={`absolute bottom-[calc(100%+5px)] bg-slate-900 text-white text-[9px] py-0.5 px-1.5 rounded shadow-md z-20 pointer-events-none transition-all duration-150 ${
+                                hoveredBarIndex === index ? "opacity-100 translate-y-0" : "opacity-0 translate-y-1"
+                              }`}
+                            >
+                              ฿{d.value.toLocaleString("th-TH", { minimumFractionDigits: 1 })}
+                            </div>
+
+                            <div className="w-8 sm:w-10 bg-slate-50 rounded border border-slate-100 h-14 flex items-end relative overflow-hidden">
+                              <motion.div 
+                                className={`w-full rounded-b transition-all duration-300 ${
+                                  d.value > 0 ? "bg-gradient-to-t from-rose-500 to-rose-400 group-hover/bar:from-rose-600 group-hover/bar:to-rose-500" : "bg-slate-200"
+                                }`}
+                                initial={{ height: 0 }}
+                                animate={{ height: `${displayHeight}%` }}
+                                transition={{ duration: 0.4 }}
+                              />
+                            </div>
+                            <span className="text-[9px] font-bold text-slate-700">
+                              ฿{d.value > 1000 ? `${(d.value / 1000).toFixed(1)}k` : d.value.toFixed(0)}
+                            </span>
+                            <span className="text-[8px] text-slate-400 font-bold uppercase tracking-tighter">
+                              {d.label.split(" ")[0]}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
           {/* Advanced Bento Filter Box */}
-          <div className="bg-white border border-slate-200 p-5 rounded-2xl shadow-xs space-y-4">
+          <div className="bg-white border border-slate-200 p-4 rounded-2xl shadow-xs space-y-3">
             
             <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
               
@@ -1872,13 +1942,39 @@ export default function App() {
 
             {/* Sorting Control Info Bar */}
             <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3">
-              <div className="flex gap-1">
+              <div className="flex flex-wrap gap-1.5 items-center">
                 <button
                   onClick={() => handleExportCSV()}
-                  className="text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold px-3 py-1.5 rounded-lg border border-emerald-200 flex items-center gap-1 transition"
+                  className="text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold px-3 py-1.5 rounded-lg border border-emerald-200 flex items-center gap-1 transition cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
                   ดาวน์โหลดรายงาน (CSV เฉพาะที่กรอง)
+                </button>
+
+                {/* LINE Messaging Button */}
+                <button
+                  type="button"
+                  onClick={() => handleSendLineSummary()}
+                  disabled={isSendingLine}
+                  className="text-xs bg-[#06C755] hover:bg-[#05b04b] disabled:bg-emerald-200 text-white font-bold px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition cursor-pointer shadow-xs active:scale-95"
+                >
+                  {isSendingLine ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
+                      <path d="M24 10.304c0-5.369-5.383-9.738-12-9.738-6.616 0-12 4.369-12 9.738 0 4.814 4.269 8.846 10.036 9.564.39.084.922.258 1.057.592.12.313.08.802.039 1.121-.122.973-.42 3.305-.42 3.305s-.08.468.232.635c.162.088.396.024.396.024s2.42-1.424 4.832-3.693c1.986-1.866 2.766-2.906 3.766-4.664 2.502-2.186 4.103-5.26 4.103-8.866zm-15.932 3.376h-1.636c-.452 0-.818-.366-.818-.818V9.123c0-.452.366-.818.818-.818.452 0 .818.366.818.818v2.923h.818c.452 0 .818.366.818.818a.816.816 0 0 1-.818.819zm2.454 0c-.452 0-.818-.366-.818-.818V9.123c0-.452.366-.818.818-.818.452 0 .818.366.818.818v3.739c0 .452-.366.818-.818.818zm4.498-.818c0 .452-.366.818-.818.818h-1.636c-.452 0-.818-.366-.818-.818V9.123c0-.452.366-.818.818-.818h1.636c.452 0 .818.366.818.818 0 .452-.366.818-.818.818H13.43v1.091h1.363c.452 0 .818.366.818.818 0 .452-.366.818-.818.818H13.43v1.091h1.363c.452 0 .818.366.818.818zm4.455 0c0 .452-.366.818-.818.818h-1.636c-.452 0-.818-.366-.818-.818V9.123c0-.452.366-.818.818-.818.452 0 .818.366.818.818v1.631l1.522-1.522c.264-.264.718-.112.784.254.024.129-.021.261-.118.358l-1.077 1.077 1.157 1.635a.818.818 0 0 1-.689 1.306.822.822 0 0 1-.568-.225l-.893-1.262v1.272c0 .452-.366.818-.818.818a.816.816 0 0 1-.818-.819V9.123zm0 0" />
+                    </svg>
+                  )}
+                  ส่งสรุปผลเข้า LINE
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowLineConfig(true)}
+                  className="text-xs bg-slate-50 hover:bg-slate-100 text-slate-600 font-bold p-1.5 rounded-lg border border-slate-200 transition cursor-pointer flex items-center justify-center"
+                  title="ตั้งค่า LINE Messaging API Token"
+                >
+                  <Settings className="w-3.5 h-3.5" />
                 </button>
                 <button
                   onClick={() => {
@@ -1993,6 +2089,11 @@ export default function App() {
                             <div className="text-[10px] text-slate-400 font-mono mt-1">
                               {formatThaiDate(item.date)} • ดิบ: {item.grossWeight.toFixed(2)}กก. • สุทธิ: {item.netWeight.toFixed(2)}กก.
                             </div> 
+                            {item.notes && (
+                              <div className="text-[10px] text-slate-500 bg-slate-50 p-1.5 rounded-lg border border-slate-100 mt-1.5 font-medium max-w-xs break-words">
+                                <span className="font-bold text-slate-700">บันทึก:</span> {item.notes}
+                              </div>
+                            )} 
                           </td>
 
                           {/* Percent Yield */}
@@ -2065,200 +2166,6 @@ export default function App() {
 
         </main>
       </div>
-      ) : (
-        <motion.div 
-          initial={{ opacity: 0, y: 15 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="grid grid-cols-12 gap-6 flex-1 min-h-0"
-        >
-          {/* USER MANAGEMENT BENTO BOX */}
-          <div className="col-span-12 lg:col-span-6 bg-white border border-slate-200 p-6 rounded-2xl shadow-xs">
-            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-100 pb-3 mb-4 font-mono">
-              <UserPlus className="w-4 h-4 text-blue-500" />
-              เพิ่มผู้ใช้งานใหม่ (Add New User / Chef)
-            </h3>
-            <p className="text-xs text-slate-400 font-serif italic mb-6">
-              ลงทะเบียนพนักงาน ผู้ช่วย หรือผู้ใช้งานเพิ่ม เพื่อใช้งานระบบบันทึกและวิเคราะห์คำนวณต้นทุนร่วมกัน
-            </p>
-
-            <form onSubmit={handleCreateAdminUser} className="space-y-4">
-              <div className="space-y-1.5">
-                <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
-                  ชื่อผู้ใช้งาน (Username) <span className="text-rose-500">*</span>
-                </label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-                    <User className="w-4 h-4" />
-                  </span>
-                  <input
-                    type="text"
-                    required
-                    value={newAdminUser}
-                    onChange={(e) => setNewAdminUser(e.target.value)}
-                    placeholder="เช่น chef_assist, owner2"
-                    className="w-full border border-slate-200 focus:border-slate-900 rounded-xl pl-10 pr-4 py-2.5 outline-none text-sm transition-colors bg-slate-50/50 font-semibold text-slate-800"
-                  />
-                </div>
-                <span className="text-[9px] text-slate-400 block mt-0.5 font-mono">
-                  {isSupabaseEnabled ? `* ในโหมดคลาวด์ บัญชีจะถูกแปลงเป็นอีเมล ${newAdminUser || '...'}@smartyield.pro` : "* ในโหมดออฟไลน์ บัญชีจะถูกจัดเก็บไว้เฉพาะในเบราว์เซอร์เครื่องนี้"}
-                </span>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
-                  รหัสผ่าน (Password) <span className="text-rose-500">*</span>
-                </label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-                    <Lock className="w-4 h-4" />
-                  </span>
-                  <input
-                    type="password"
-                    required
-                    value={newAdminPass}
-                    onChange={(e) => setNewAdminPass(e.target.value)}
-                    placeholder="รหัสผ่านอย่างน้อย 6 หลัก"
-                    className="w-full border border-slate-200 focus:border-slate-900 rounded-xl pl-10 pr-4 py-2.5 outline-none text-sm transition-colors bg-slate-50/50 font-semibold text-slate-800"
-                  />
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={isAdminCreating}
-                className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs py-3 rounded-xl tracking-widest uppercase transition-all shadow-xs cursor-pointer flex items-center justify-center gap-2 mt-4 disabled:opacity-50"
-              >
-                {isAdminCreating ? (
-                  <>
-                    <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    กำลังประมวลผล...
-                  </>
-                ) : (
-                  <>
-                    <UserPlus className="w-3.5 h-3.5" />
-                    ลงทะเบียนผู้ใช้ใหม่
-                  </>
-                )}
-              </button>
-            </form>
-          </div>
-
-          {/* STORAGE CONFIGURATION BENTO BOX */}
-          <div className="col-span-12 lg:col-span-6 bg-white border border-slate-200 p-6 rounded-2xl shadow-xs">
-            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-100 pb-3 mb-4 font-mono">
-              <Database className="w-4 h-4 text-emerald-500" />
-              การตั้งค่าฐานข้อมูล & การจัดเก็บข้อมูล (System Storage)
-            </h3>
-            <p className="text-xs text-slate-400 font-serif italic mb-4">
-              กำหนดช่องทางการเชื่อมต่อเซิร์ฟเวอร์ฐานข้อมูลในการประมวลผลระหว่างระบบคลาวด์และฐานข้อมูลในเครื่องของคุณ
-            </p>
-
-            <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[10px] uppercase font-black text-slate-500 tracking-wider flex items-center gap-1.5 font-mono">
-                  <Database className="w-3.5 h-3.5 text-blue-500" />
-                  ช่องทางหลักที่เปิดใช้งาน
-                </span>
-                <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded font-mono ${
-                  isSupabaseEnabled 
-                    ? "bg-emerald-50 text-emerald-700 border border-emerald-100" 
-                    : "bg-slate-200 text-slate-600"
-                }`}>
-                  {isSupabaseEnabled ? "SUPABASE ONLINE" : "LOCAL STORAGE"}
-                </span>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsSupabaseEnabled(false);
-                    safeLocalStorage.setItem("smart_yield_pro_supabase_enabled", "false");
-                    showToast("สลับเป็นโหมดออฟไลน์ (LocalStorage)", "info");
-                  }}
-                  className={`py-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer border ${
-                    !isSupabaseEnabled 
-                      ? "bg-white text-slate-900 border-slate-300 shadow-sm" 
-                      : "text-slate-400 border-transparent hover:text-slate-600"
-                  }`}
-                >
-                  <WifiOff className="w-3.5 h-3.5" />
-                  LocalStorage (เครื่องนี้)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsSupabaseEnabled(true);
-                    safeLocalStorage.setItem("smart_yield_pro_supabase_enabled", "true");
-                    showToast("สลับเป็นโหมด Supabase Cloud", "info");
-                  }}
-                  className={`py-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer border ${
-                    isSupabaseEnabled 
-                      ? "bg-white text-slate-900 border-slate-300 shadow-sm" 
-                      : "text-slate-400 border-transparent hover:text-slate-600"
-                  }`}
-                >
-                  <Wifi className="w-3.5 h-3.5 text-emerald-500" />
-                  Supabase (ระบบคลาวด์)
-                </button>
-              </div>
-
-              {isSupabaseEnabled && (
-                <div className="pt-3 border-t border-slate-200 space-y-3">
-                  <div className="space-y-1.5">
-                    <label className="text-[9px] uppercase font-bold text-slate-400 tracking-wider block font-mono">
-                      Supabase Project URL
-                    </label>
-                    <input
-                      type="text"
-                      value={supabaseConfig.supabaseUrl}
-                      onChange={(e) => {
-                        const newConf = { ...supabaseConfig, supabaseUrl: e.target.value };
-                        setSupabaseConfig(newConf);
-                        safeLocalStorage.setItem("smart_yield_pro_supabase_config", JSON.stringify(newConf));
-                      }}
-                      placeholder="https://your-project.supabase.co"
-                      className="w-full border border-slate-200 focus:border-slate-900 rounded-lg px-2.5 py-1.5 outline-none text-xs font-mono font-semibold text-slate-700 bg-white"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-[9px] uppercase font-bold text-slate-400 tracking-wider block font-mono">
-                      Supabase Anon Key
-                    </label>
-                    <input
-                      type="password"
-                      value={supabaseConfig.supabaseAnonKey}
-                      onChange={(e) => {
-                        const newConf = { ...supabaseConfig, supabaseAnonKey: e.target.value };
-                        setSupabaseConfig(newConf);
-                        safeLocalStorage.setItem("smart_yield_pro_supabase_config", JSON.stringify(newConf));
-                      }}
-                      placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                      className="w-full border border-slate-200 focus:border-slate-900 rounded-lg px-2.5 py-1.5 outline-none text-xs font-mono font-semibold text-slate-700 bg-white"
-                    />
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const success = initSupabaseSafely(supabaseConfig);
-                      if (success) {
-                        setIsSupabaseInitialized(true);
-                        showToast("เชื่อมต่อ Supabase Client สำเร็จ!", "success");
-                      } else {
-                        showToast("โปรดตรวจสอบข้อมูลเชื่อมต่อ Supabase URL & Key", "error");
-                      }
-                    }}
-                    className="w-full py-2 bg-slate-900 text-white rounded-lg text-[10px] font-bold uppercase tracking-wider hover:bg-slate-800 transition cursor-pointer"
-                  >
-                    {isSupabaseInitialized ? "✓ ตรวจสอบการเชื่อมต่อ: ทำงานได้" : "⚡ ทดสอบการเชื่อมต่อ client"}
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        </motion.div>
-      )}
 
       {/* --- Footer Bento Style --- */}
       <footer className="mt-8 flex justify-between items-center text-[10px] font-bold text-slate-400 uppercase tracking-widest border-t border-slate-200 pt-4"> 
@@ -2599,6 +2506,130 @@ export default function App() {
                 <Check className="w-4 h-4 text-emerald-100" />
                 <span>ตกลง / ยืนยันข้อมูล (Confirm)</span>
               </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* MODAL: LINE Messaging API Token Configuration */}
+      <AnimatePresence>
+        {showLineConfig && (
+          <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-white border border-slate-200 rounded-2xl max-w-lg w-full p-6 shadow-xl relative my-8"
+            >
+              <button
+                onClick={() => setShowLineConfig(false)}
+                className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition p-1 rounded-lg hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+
+              <div className="flex items-center gap-2 mb-4">
+                <div className="p-1.5 bg-[#06C755] text-white rounded-lg">
+                  <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
+                    <path d="M24 10.304c0-5.369-5.383-9.738-12-9.738-6.616 0-12 4.369-12 9.738 0 4.814 4.269 8.846 10.036 9.564.39.084.922.258 1.057.592.12.313.08.802.039 1.121-.122.973-.42 3.305-.42 3.305s-.08.468.232.635c.162.088.396.024.396.024s2.42-1.424 4.832-3.693c1.986-1.866 2.766-2.906 3.766-4.664 2.502-2.186 4.103-5.26 4.103-8.866z" />
+                  </svg>
+                </div>
+                <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900 font-sans">
+                  ตั้งค่าการส่งข้อมูลสรุปเข้า LINE Group
+                </h3>
+              </div>
+
+              <div className="space-y-4 text-xs text-slate-600 leading-relaxed max-h-[55vh] overflow-y-auto pr-1">
+                {/* Step Instructions */}
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 space-y-2.5">
+                  <h4 className="font-bold text-slate-800 text-xs">
+                    ขั้นตอนการตั้งค่า Token ของ LINE Messaging API:
+                  </h4>
+                  <ol className="list-decimal list-inside space-y-1.5 text-slate-600 pl-1">
+                    <li>
+                      ไปที่ <a href="https://developers.line.biz/" target="_blank" rel="noreferrer" className="text-blue-600 hover:underline font-bold">LINE Developers Console</a> แล้วเข้าสู่ระบบ
+                    </li>
+                    <li>
+                      สร้าง <b>Provider</b> และสร้าง <b>Messaging API Channel</b> (หากยังไม่มีบอท)
+                    </li>
+                    <li>
+                      เข้าไปที่ Channel ของคุณ กดไปที่แท็บ <b>Messaging API</b>
+                    </li>
+                    <li>
+                      เลื่อนลงไปด้านล่างสุดในส่วน <b>Channel access token (long-lived)</b> แล้วกดปุ่ม <b>Issue</b> เพื่อสร้าง Token จากนั้นคัดลอกมาใส่ในช่องด้านล่างนี้
+                    </li>
+                    <li>
+                      นำ LINE บอทของคุณแอดเข้าเป็นเพื่อนใน LINE Group ที่ต้องการรับข้อมูล
+                    </li>
+                    <li>
+                      คัดลอก <b>Group ID</b> (ขึ้นต้นด้วยอักษร <code>C...</code> ความยาวประมาณ 33 หลัก) หรือ <b>User ID</b> (ขึ้นต้นด้วย <code>U...</code>) นำมาใส่ในช่อง ID ผู้รับ
+                    </li>
+                  </ol>
+                  <p className="text-[10px] text-amber-600 font-bold bg-amber-50 p-2 rounded-lg border border-amber-100 mt-1">
+                    * หมายเหตุ: หากไม่ใส่ Token ในส่วนนี้ ระบบจะพยายามดึงข้อมูลจากไฟล์คอนฟิก <code>.env</code> (LINE_CHANNEL_ACCESS_TOKEN และ LINE_RECIPIENT_ID) บนระบบ Server โดยอัตโนมัติ
+                  </p>
+                </div>
+
+                {/* Form Inputs */}
+                <div className="space-y-3 pt-2">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block font-mono">
+                      LINE Channel Access Token
+                    </label>
+                    <input
+                      type="password"
+                      value={lineChannelAccessToken}
+                      onChange={(e) => {
+                        setLineChannelAccessToken(e.target.value);
+                        safeLocalStorage.setItem("line_channel_access_token", e.target.value);
+                      }}
+                      placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                      className="w-full border border-slate-200 rounded-lg p-2 text-xs bg-slate-50 hover:bg-slate-100 outline-none font-mono text-slate-700"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block font-mono">
+                      ID ผู้รับ (User ID / Group ID / Room ID)
+                    </label>
+                    <input
+                      type="text"
+                      value={lineRecipientId}
+                      onChange={(e) => {
+                        setLineRecipientId(e.target.value);
+                        safeLocalStorage.setItem("line_recipient_id", e.target.value);
+                      }}
+                      placeholder="C1234567890abcdef1234567890abcdef"
+                      className="w-full border border-slate-200 rounded-lg p-2 text-xs bg-slate-50 hover:bg-slate-100 outline-none font-mono text-slate-700"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-5 pt-3 border-t border-slate-100 flex justify-between items-center">
+                <span className="text-[10px] text-slate-400 font-bold uppercase font-mono">
+                  บันทึกอัตโนมัติในเบราว์เซอร์
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      // Trigger a quick test send
+                      handleSendLineSummary();
+                    }}
+                    disabled={isSendingLine}
+                    className="px-4 py-1.5 bg-[#06C755] hover:bg-[#05b04b] disabled:bg-emerald-100 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                  >
+                    {isSendingLine ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
+                    ทดสอบส่งข้อความ
+                  </button>
+                  <button
+                    onClick={() => setShowLineConfig(false)}
+                    className="px-4 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-bold hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    ปิดการตั้งค่า
+                  </button>
+                </div>
+              </div>
             </motion.div>
           </div>
         )}

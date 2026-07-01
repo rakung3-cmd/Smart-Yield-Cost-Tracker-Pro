@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS public.ingredients (
     net_weight NUMERIC(10, 4) NOT NULL CHECK (net_weight >= 0),
     total_purchase_price NUMERIC(12, 2) NOT NULL CHECK (total_purchase_price >= 0),
     date DATE NOT NULL DEFAULT CURRENT_DATE,
+    notes TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL,
     CONSTRAINT net_less_than_gross CHECK (net_weight <= gross_weight)
 );
