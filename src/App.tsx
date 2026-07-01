@@ -86,8 +86,16 @@ let globalSupabase: SupabaseClient | null = null;
 // Helper to initialize Supabase safely
 const initSupabaseSafely = (config: SupabaseConfig): boolean => {
   if (!config.supabaseUrl || !config.supabaseAnonKey) return false;
+  
+  // Trim and check URL prefix
+  const url = config.supabaseUrl.trim();
+  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+    console.warn("Supabase init bypassed: invalid URL protocol");
+    return false;
+  }
+
   try {
-    globalSupabase = createClient(config.supabaseUrl, config.supabaseAnonKey, {
+    globalSupabase = createClient(url, config.supabaseAnonKey.trim(), {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
@@ -96,7 +104,7 @@ const initSupabaseSafely = (config: SupabaseConfig): boolean => {
     });
     return true;
   } catch (e) {
-    console.error("Supabase init failed: ", e);
+    console.warn("Supabase init bypassed: ", e);
     return false;
   }
 };
@@ -181,11 +189,19 @@ export default function App() {
 
   // --- Auth States ---
   const [currentUser, setCurrentUser] = useState<string | null>(() => {
-    return safeLocalStorage.getItem("smart_yield_pro_session");
+    return safeLocalStorage.getItem("smart_yield_pro_session") || "admin";
   });
   const [authMode, setAuthMode] = useState<"login" | "signup">("login");
   const [usernameInput, setUsernameInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
+
+  // --- Active Tab State ---
+  const [activeTab, setActiveTab] = useState<"dashboard" | "admin">("dashboard");
+
+  // --- System User Admin States ---
+  const [newAdminUser, setNewAdminUser] = useState("");
+  const [newAdminPass, setNewAdminPass] = useState("");
+  const [isAdminCreating, setIsAdminCreating] = useState(false);
 
   // --- Persistent State ---
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
@@ -390,8 +406,8 @@ export default function App() {
             setCurrentUser(userStr);
             safeLocalStorage.setItem("smart_yield_pro_session", userStr);
           } else {
-            setCurrentUser(null);
-            safeLocalStorage.removeItem("smart_yield_pro_session");
+            setCurrentUser("admin");
+            safeLocalStorage.setItem("smart_yield_pro_session", "admin");
           }
         });
 
@@ -402,8 +418,8 @@ export default function App() {
             setCurrentUser(userStr);
             safeLocalStorage.setItem("smart_yield_pro_session", userStr);
           } else {
-            setCurrentUser(null);
-            safeLocalStorage.removeItem("smart_yield_pro_session");
+            setCurrentUser("admin");
+            safeLocalStorage.setItem("smart_yield_pro_session", "admin");
           }
         });
 
@@ -419,6 +435,87 @@ export default function App() {
 
   // Check if Supabase is active
   const isSupabaseActive = isSupabaseEnabled && isSupabaseInitialized && !!supabaseSession;
+
+  // --- Automatic Default Admin Account Creation ---
+  const createDefaultAdmin = async () => {
+    // 1. Check and create for LocalStorage mode
+    const usersRaw = safeLocalStorage.getItem("smart_yield_pro_users");
+    let localUsers: any[] = [];
+    if (usersRaw) {
+      try {
+        localUsers = JSON.parse(usersRaw);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    const hasAdmin = localUsers.some((u: any) => u.username.toLowerCase() === "admin");
+    const hasAdminEmail = localUsers.some((u: any) => u.username.toLowerCase() === "admin@smartyield.com");
+    
+    let localUpdated = false;
+    if (!hasAdmin) {
+      localUsers.push({ username: "admin", password: "123456" });
+      localUpdated = true;
+    }
+    if (!hasAdminEmail) {
+      localUsers.push({ username: "admin@smartyield.com", password: "123456" });
+      localUpdated = true;
+    }
+    if (localUpdated) {
+      safeLocalStorage.setItem("smart_yield_pro_users", JSON.stringify(localUsers));
+      console.log("Default admin credentials created in LocalStorage.");
+    }
+
+    // 2. Check and create for Supabase mode (if initialized)
+    if (isSupabaseEnabled && isSupabaseInitialized && globalSupabase) {
+      const emailsToRegister = ["admin@smartyield.pro", "admin@smartyield.com"];
+      for (const email of emailsToRegister) {
+        try {
+          const cacheKey = `smart_yield_pro_admin_checked_${email}`;
+          const alreadyChecked = safeLocalStorage.getItem(cacheKey);
+          if (alreadyChecked === "true") continue;
+
+          // Try to login to see if it exists
+          const { error: signInError } = await globalSupabase.auth.signInWithPassword({
+            email: email,
+            password: "123456"
+          });
+
+          if (signInError) {
+            console.log(`Admin email ${email} login failed or does not exist, attempting to signUp...`);
+            const { error: signUpError } = await globalSupabase.auth.signUp({
+              email: email,
+              password: "123456",
+              options: {
+                data: {
+                  username: "admin"
+                }
+              }
+            });
+
+            if (!signUpError) {
+              console.log(`Default admin created in Supabase for email: ${email}`);
+              safeLocalStorage.setItem(cacheKey, "true");
+            } else {
+              console.warn(`Supabase admin signUp error for ${email}: `, signUpError.message);
+              if (signUpError.message.toLowerCase().includes("already registered") || signUpError.message.toLowerCase().includes("already exists")) {
+                safeLocalStorage.setItem(cacheKey, "true");
+              }
+            }
+          } else {
+            console.log(`Default admin ${email} already exists in Supabase.`);
+            await globalSupabase.auth.signOut();
+            safeLocalStorage.setItem(cacheKey, "true");
+          }
+        } catch (err) {
+          console.warn(`Error checking/creating default admin ${email} in Supabase: `, err);
+        }
+      }
+    }
+  };
+
+  useEffect(() => {
+    createDefaultAdmin();
+  }, [isSupabaseEnabled, isSupabaseInitialized]);
 
   // Function to fetch ingredients from Supabase
   const fetchIngredients = async () => {
@@ -498,7 +595,7 @@ export default function App() {
       showToast("สลับมาใช้โหมดออฟไลน์ (LocalStorage) เรียบร้อยแล้ว", "info");
       // Settle session back to local storage session if any
       const localSess = safeLocalStorage.getItem("smart_yield_pro_session_local");
-      setCurrentUser(localSess);
+      setCurrentUser(localSess || "admin");
     }
     setShowConfigModal(false);
   };
@@ -656,6 +753,77 @@ export default function App() {
       showToast("ออกจากระบบเรียบร้อยแล้ว", "info");
     }
     resetForm();
+  };
+
+  const handleCreateAdminUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const username = newAdminUser.trim();
+    const password = newAdminPass;
+
+    if (!username || !password) {
+      showToast("กรุณากรอกข้อมูลผู้ใช้งานให้ครบถ้วน", "error");
+      return;
+    }
+
+    if (password.length < 6) {
+      showToast("รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร", "error");
+      return;
+    }
+
+    setIsAdminCreating(true);
+
+    if (isSupabaseEnabled && isSupabaseInitialized && globalSupabase) {
+      try {
+        const email = getSupabaseEmail(username);
+        // Call supabase.auth.signUp() to register user
+        const { data, error } = await globalSupabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              username: username
+            }
+          }
+        });
+
+        if (error) throw error;
+
+        showToast(`เพิ่มผู้ใช้งานใหม่ "${username}" บนระบบ Supabase สำเร็จ!`, "success");
+        setNewAdminUser("");
+        setNewAdminPass("");
+      } catch (err: any) {
+        console.error("Supabase Admin SignUp error", err);
+        showToast(err.message || "ไม่สามารถเพิ่มผู้ใช้งานใหม่ได้", "error");
+      } finally {
+        setIsAdminCreating(false);
+      }
+    } else {
+      // LocalStorage mode signup
+      const usersRaw = safeLocalStorage.getItem("smart_yield_pro_users");
+      let users: any[] = [];
+      if (usersRaw) {
+        try {
+          users = JSON.parse(usersRaw);
+        } catch (e) {
+          console.error(e);
+        }
+      }
+
+      const userExists = users.some((u: any) => u.username.toLowerCase() === username.toLowerCase());
+      if (userExists) {
+        showToast("ไอดีนี้ถูกใช้งานแล้ว กรุณาใช้ไอดีอื่น", "error");
+        setIsAdminCreating(false);
+        return;
+      }
+
+      users.push({ username, password });
+      safeLocalStorage.setItem("smart_yield_pro_users", JSON.stringify(users));
+
+      showToast(`เพิ่มผู้ใช้งานใหม่ "${username}" (ออฟไลน์) สำเร็จ!`, "success");
+      setNewAdminUser("");
+      setNewAdminPass("");
+      setIsAdminCreating(false);
+    }
   };
 
   // --- Trigger toast notification ---
@@ -1088,284 +1256,6 @@ export default function App() {
     showToast("ดาวน์โหลดไฟล์รายงาน CSV เรียบร้อยแล้ว", "success");
   };
 
-  if (!currentUser) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen w-full bg-[#f8fafc] text-slate-900 font-sans p-4 relative overflow-hidden">
-        {/* Subtle Decorative Ambient Glows */}
-        <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] rounded-full bg-blue-50/60 blur-[120px] pointer-events-none" />
-        <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] rounded-full bg-emerald-50/60 blur-[120px] pointer-events-none" />
-
-        {/* Toast Notification */}
-        <AnimatePresence>
-          {toast && (
-            <motion.div
-              initial={{ opacity: 0, y: -40, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -20, scale: 0.95 }}
-              className={`fixed top-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-5 py-3.5 rounded-xl shadow-lg border bg-white ${
-                toast.type === "success" 
-                  ? "border-emerald-200 text-slate-800 shadow-emerald-100/50" 
-                  : toast.type === "error"
-                  ? "border-rose-200 text-slate-800 shadow-rose-100/50"
-                  : "border-slate-200 text-slate-800 shadow-slate-100/50"
-              }`}
-            >
-              <div className={`p-1.5 rounded-md ${
-                toast.type === "success" 
-                  ? "bg-emerald-50 text-emerald-600" 
-                  : toast.type === "error"
-                  ? "bg-rose-50 text-rose-600"
-                  : "bg-slate-100 text-slate-600"
-              }`}>
-                {toast.type === "success" && <Check className="w-4 h-4" />}
-                {toast.type === "error" && <AlertTriangle className="w-4 h-4" />}
-                {toast.type === "info" && <Info className="w-4 h-4" />}
-              </div>
-              <p className="text-xs font-bold tracking-tight font-mono">{toast.message}</p>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Auth Card Container */}
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-md bg-white border border-slate-200 rounded-3xl p-6 sm:p-8 shadow-xl relative z-10"
-        >
-          {/* Logo & Slogan Header */}
-          <div className="text-center mb-8">
-            <div className="inline-flex h-12 w-12 bg-slate-900 text-white rounded-2xl items-center justify-center font-black text-xl mb-3 shadow-md shadow-slate-950/10">Y</div>
-            <h1 className="text-xl font-black tracking-tight uppercase text-slate-900">
-              Smart Yield Pro
-            </h1>
-            <p className="text-slate-400 text-[11px] font-medium uppercase tracking-widest mt-1">
-              Yield & Cost Tracker
-            </p>
-          </div>
-
-          {/* Storage Connection Switcher */}
-          <div className="mb-6 p-4 bg-slate-50 border border-slate-200 rounded-2xl">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] uppercase font-black text-slate-500 tracking-wider flex items-center gap-1.5">
-                <Database className="w-3.5 h-3.5 text-blue-500" />
-                โหมดการจัดเก็บข้อมูล
-              </span>
-              <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded font-mono ${
-                isSupabaseEnabled 
-                  ? "bg-emerald-50 text-emerald-700 border border-emerald-100" 
-                  : "bg-slate-200 text-slate-600"
-              }`}>
-                {isSupabaseEnabled ? "SUPABASE ONLINE" : "LOCAL STORAGE"}
-              </span>
-            </div>
-            <p className="text-[10px] text-slate-400 mb-3 leading-relaxed font-semibold">
-              เลือกจัดเก็บข้อมูลออฟไลน์ในเครื่อง หรือซิงค์ขึ้นคลาวด์แบบ Realtime ด้วย Supabase
-            </p>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setIsSupabaseEnabled(false);
-                  safeLocalStorage.setItem("smart_yield_pro_supabase_enabled", "false");
-                  showToast("สลับเป็นโหมดออฟไลน์ (LocalStorage)", "info");
-                }}
-                className={`py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer border ${
-                  !isSupabaseEnabled 
-                    ? "bg-white text-slate-900 border-slate-300 shadow-xs" 
-                    : "text-slate-400 border-transparent hover:text-slate-600"
-                }`}
-              >
-                <WifiOff className="w-3.5 h-3.5" />
-                LocalStorage
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsSupabaseEnabled(true);
-                  safeLocalStorage.setItem("smart_yield_pro_supabase_enabled", "true");
-                  showToast("สลับเป็นโหมด Supabase Cloud (กรุณาตั้งค่า)", "info");
-                }}
-                className={`py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer border ${
-                  isSupabaseEnabled 
-                    ? "bg-white text-slate-900 border-slate-300 shadow-xs" 
-                    : "text-slate-400 border-transparent hover:text-slate-600"
-                }`}
-              >
-                <Wifi className="w-3.5 h-3.5 text-emerald-500" />
-                Supabase Cloud
-              </button>
-            </div>
-
-            {/* Supabase Config Inputs if enabled */}
-            <AnimatePresence>
-              {isSupabaseEnabled && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="mt-4 pt-4 border-t border-slate-200 space-y-3 overflow-hidden"
-                >
-                  <div className="space-y-1.5">
-                    <label className="text-[9px] uppercase font-bold text-slate-400 tracking-wider block">
-                      Supabase Project URL
-                    </label>
-                    <input
-                      type="text"
-                      value={supabaseConfig.supabaseUrl}
-                      onChange={(e) => {
-                        const newConf = { ...supabaseConfig, supabaseUrl: e.target.value };
-                        setSupabaseConfig(newConf);
-                        safeLocalStorage.setItem("smart_yield_pro_supabase_config", JSON.stringify(newConf));
-                      }}
-                      placeholder="https://your-project.supabase.co"
-                      className="w-full border border-slate-200 focus:border-slate-900 rounded-lg px-2.5 py-1.5 outline-none text-xs font-mono font-semibold text-slate-700 bg-white"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-[9px] uppercase font-bold text-slate-400 tracking-wider block">
-                      Supabase Anon Public API Key
-                    </label>
-                    <input
-                      type="password"
-                      value={supabaseConfig.supabaseAnonKey}
-                      onChange={(e) => {
-                        const newConf = { ...supabaseConfig, supabaseAnonKey: e.target.value };
-                        setSupabaseConfig(newConf);
-                        safeLocalStorage.setItem("smart_yield_pro_supabase_config", JSON.stringify(newConf));
-                      }}
-                      placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                      className="w-full border border-slate-200 focus:border-slate-900 rounded-lg px-2.5 py-1.5 outline-none text-xs font-mono font-semibold text-slate-700 bg-white"
-                    />
-                  </div>
-                  
-                  {/* Quick Connection check */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const success = initSupabaseSafely(supabaseConfig);
-                      if (success) {
-                        setIsSupabaseInitialized(true);
-                        showToast("เชื่อมต่อ Supabase Client สำเร็จ!", "success");
-                      } else {
-                        showToast("โปรดตรวจสอบข้อมูลเชื่อมต่อ Supabase URL & Key", "error");
-                      }
-                    }}
-                    className="w-full py-1.5 bg-slate-900 text-white rounded-lg text-[10px] font-bold uppercase tracking-wider hover:bg-slate-800 transition cursor-pointer"
-                  >
-                    {isSupabaseInitialized ? "✓ เชื่อมต่อสำเร็จ" : "⚡ ทดสอบการเชื่อมต่อ client"}
-                  </button>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-
-          {/* Toggle Tabs */}
-          <div className="grid grid-cols-2 bg-slate-100 p-1 rounded-xl mb-6">
-            <button
-              onClick={() => {
-                setAuthMode("login");
-                setUsernameInput("");
-                setPasswordInput("");
-              }}
-              className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                authMode === "login" 
-                  ? "bg-white text-slate-900 shadow-xs" 
-                  : "text-slate-400 hover:text-slate-600"
-              }`}
-            >
-              <LogIn className="w-3.5 h-3.5" />
-              ล็อกอิน
-            </button>
-            <button
-              onClick={() => {
-                setAuthMode("signup");
-                setUsernameInput("");
-                setPasswordInput("");
-              }}
-              className={`py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                authMode === "signup" 
-                  ? "bg-white text-slate-900 shadow-xs" 
-                  : "text-slate-400 hover:text-slate-600"
-              }`}
-            >
-              <UserPlus className="w-3.5 h-3.5" />
-              สมัครสมาชิก
-            </button>
-          </div>
-
-          {/* Form */}
-          <form onSubmit={authMode === "login" ? handleLogin : handleSignUp} className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
-                ไอดี (Username)
-              </label>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-                  <User className="w-4 h-4" />
-                </span>
-                <input
-                  type="text"
-                  required
-                  value={usernameInput}
-                  onChange={(e) => setUsernameInput(e.target.value)}
-                  placeholder="เช่น admin, chef_owner"
-                  className="w-full border border-slate-200 focus:border-slate-900 rounded-xl pl-10 pr-4 py-2.5 outline-none text-sm transition-colors bg-slate-50/50 font-semibold text-slate-800"
-                />
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
-                รหัสผ่าน (Password)
-              </label>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-                  <Lock className="w-4 h-4" />
-                </span>
-                <input
-                  type="password"
-                  required
-                  value={passwordInput}
-                  onChange={(e) => setPasswordInput(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full border border-slate-200 focus:border-slate-900 rounded-xl pl-10 pr-4 py-2.5 outline-none text-sm transition-colors bg-slate-50/50 font-semibold text-slate-800"
-                />
-              </div>
-            </div>
-
-            {authMode === "signup" && (
-              <p className="text-[10px] text-slate-400 italic">
-                * ข้อมูลผู้ใช้จะถูกจัดเก็บไว้เฉพาะในเบราว์เซอร์ของคุณผ่าน LocalStorage มีความปลอดภัยและแยกสิทธิ์เข้าถึงรายบุคคล
-              </p>
-            )}
-
-            <button
-              type="submit"
-              className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs py-3 rounded-xl tracking-widest uppercase transition-colors shadow-xs cursor-pointer flex items-center justify-center gap-2 mt-2"
-            >
-              {authMode === "login" ? (
-                <>
-                  <LogIn className="w-3.5 h-3.5" />
-                  เข้าสู่ระบบ
-                </>
-              ) : (
-                <>
-                  <UserPlus className="w-3.5 h-3.5" />
-                  ลงทะเบียนผู้ใช้ใหม่
-                </>
-              )}
-            </button>
-          </form>
-        </motion.div>
-
-        {/* Simple Footer */}
-        <footer className="mt-8 text-[9px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
-          <span>Smart Yield & Cost Tracker Pro</span>
-        </footer>
-      </div>
-    );
-  }
-
   return (
     <div className="flex flex-col min-h-screen w-full bg-[#f8fafc] text-slate-900 font-sans p-4 sm:p-6 md:p-8">
       
@@ -1419,7 +1309,7 @@ export default function App() {
           <div className="bg-white border border-slate-200 px-4 py-2 rounded shadow-xs flex items-center gap-2"> 
             <User className="w-4 h-4 text-blue-500" />
             <div>
-              <span className="text-slate-400 block uppercase text-[8px] tracking-wider font-bold">Logged In As</span> 
+              <span className="text-slate-400 block uppercase text-[8px] tracking-wider font-bold">Active User</span> 
               <span className="font-bold text-slate-800">{currentUser}</span> 
             </div>
           </div> 
@@ -1435,23 +1325,43 @@ export default function App() {
             <Database className="w-4 h-4 text-slate-400" />
             <div>
               <span className="text-slate-400 block uppercase text-[8px] tracking-wider font-bold">Persistence</span> 
-              <span className="font-bold text-slate-100">LOCAL STORAGE</span> 
+              <span className="font-bold text-slate-100 uppercase">
+                {isSupabaseActive ? "SUPABASE ONLINE" : isSupabaseEnabled ? "SUPABASE SETUP" : "LOCAL STORAGE"}
+              </span> 
             </div>
           </div>
-
-          {/* Logout Button */}
-          <button 
-            onClick={handleLogout}
-            className="bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 px-4 py-2 rounded shadow-xs font-bold transition flex items-center gap-1.5 cursor-pointer ml-auto xl:ml-0"
-          >
-            <LogOut className="w-4 h-4" />
-            ออกจากระบบ
-          </button>
         </div>
       </header>
 
-      {/* Bento Layout Grid */}
-      <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
+      {/* Tab Switcher */}
+      <div className="flex gap-2 mb-6 bg-slate-100 p-1 rounded-xl max-w-md">
+        <button
+          onClick={() => setActiveTab("dashboard")}
+          className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer ${
+            activeTab === "dashboard"
+              ? "bg-white text-slate-900 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
+          }`}
+        >
+          <TrendingUp className="w-4 h-4 text-blue-500" />
+          วิเคราะห์และคำนวณแดชบอร์ด
+        </button>
+        <button
+          onClick={() => setActiveTab("admin")}
+          className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer ${
+            activeTab === "admin"
+              ? "bg-white text-slate-900 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
+          }`}
+        >
+          <Settings className="w-4 h-4 text-emerald-500" />
+          ตั้งค่าระบบ/จัดการสมาชิก
+        </button>
+      </div>
+
+      {activeTab === "dashboard" ? (
+        /* Bento Layout Grid */
+        <div className="grid grid-cols-12 gap-6 flex-1 min-h-0">
         
         {/* TOP METRIC BENTO BLOCKS (Full width on top) */}
         <div className="col-span-12 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -2155,6 +2065,200 @@ export default function App() {
 
         </main>
       </div>
+      ) : (
+        <motion.div 
+          initial={{ opacity: 0, y: 15 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="grid grid-cols-12 gap-6 flex-1 min-h-0"
+        >
+          {/* USER MANAGEMENT BENTO BOX */}
+          <div className="col-span-12 lg:col-span-6 bg-white border border-slate-200 p-6 rounded-2xl shadow-xs">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-100 pb-3 mb-4 font-mono">
+              <UserPlus className="w-4 h-4 text-blue-500" />
+              เพิ่มผู้ใช้งานใหม่ (Add New User / Chef)
+            </h3>
+            <p className="text-xs text-slate-400 font-serif italic mb-6">
+              ลงทะเบียนพนักงาน ผู้ช่วย หรือผู้ใช้งานเพิ่ม เพื่อใช้งานระบบบันทึกและวิเคราะห์คำนวณต้นทุนร่วมกัน
+            </p>
+
+            <form onSubmit={handleCreateAdminUser} className="space-y-4">
+              <div className="space-y-1.5">
+                <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
+                  ชื่อผู้ใช้งาน (Username) <span className="text-rose-500">*</span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
+                    <User className="w-4 h-4" />
+                  </span>
+                  <input
+                    type="text"
+                    required
+                    value={newAdminUser}
+                    onChange={(e) => setNewAdminUser(e.target.value)}
+                    placeholder="เช่น chef_assist, owner2"
+                    className="w-full border border-slate-200 focus:border-slate-900 rounded-xl pl-10 pr-4 py-2.5 outline-none text-sm transition-colors bg-slate-50/50 font-semibold text-slate-800"
+                  />
+                </div>
+                <span className="text-[9px] text-slate-400 block mt-0.5 font-mono">
+                  {isSupabaseEnabled ? `* ในโหมดคลาวด์ บัญชีจะถูกแปลงเป็นอีเมล ${newAdminUser || '...'}@smartyield.pro` : "* ในโหมดออฟไลน์ บัญชีจะถูกจัดเก็บไว้เฉพาะในเบราว์เซอร์เครื่องนี้"}
+                </span>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
+                  รหัสผ่าน (Password) <span className="text-rose-500">*</span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
+                    <Lock className="w-4 h-4" />
+                  </span>
+                  <input
+                    type="password"
+                    required
+                    value={newAdminPass}
+                    onChange={(e) => setNewAdminPass(e.target.value)}
+                    placeholder="รหัสผ่านอย่างน้อย 6 หลัก"
+                    className="w-full border border-slate-200 focus:border-slate-900 rounded-xl pl-10 pr-4 py-2.5 outline-none text-sm transition-colors bg-slate-50/50 font-semibold text-slate-800"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isAdminCreating}
+                className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs py-3 rounded-xl tracking-widest uppercase transition-all shadow-xs cursor-pointer flex items-center justify-center gap-2 mt-4 disabled:opacity-50"
+              >
+                {isAdminCreating ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    กำลังประมวลผล...
+                  </>
+                ) : (
+                  <>
+                    <UserPlus className="w-3.5 h-3.5" />
+                    ลงทะเบียนผู้ใช้ใหม่
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+
+          {/* STORAGE CONFIGURATION BENTO BOX */}
+          <div className="col-span-12 lg:col-span-6 bg-white border border-slate-200 p-6 rounded-2xl shadow-xs">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-100 pb-3 mb-4 font-mono">
+              <Database className="w-4 h-4 text-emerald-500" />
+              การตั้งค่าฐานข้อมูล & การจัดเก็บข้อมูล (System Storage)
+            </h3>
+            <p className="text-xs text-slate-400 font-serif italic mb-4">
+              กำหนดช่องทางการเชื่อมต่อเซิร์ฟเวอร์ฐานข้อมูลในการประมวลผลระหว่างระบบคลาวด์และฐานข้อมูลในเครื่องของคุณ
+            </p>
+
+            <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] uppercase font-black text-slate-500 tracking-wider flex items-center gap-1.5 font-mono">
+                  <Database className="w-3.5 h-3.5 text-blue-500" />
+                  ช่องทางหลักที่เปิดใช้งาน
+                </span>
+                <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded font-mono ${
+                  isSupabaseEnabled 
+                    ? "bg-emerald-50 text-emerald-700 border border-emerald-100" 
+                    : "bg-slate-200 text-slate-600"
+                }`}>
+                  {isSupabaseEnabled ? "SUPABASE ONLINE" : "LOCAL STORAGE"}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsSupabaseEnabled(false);
+                    safeLocalStorage.setItem("smart_yield_pro_supabase_enabled", "false");
+                    showToast("สลับเป็นโหมดออฟไลน์ (LocalStorage)", "info");
+                  }}
+                  className={`py-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer border ${
+                    !isSupabaseEnabled 
+                      ? "bg-white text-slate-900 border-slate-300 shadow-sm" 
+                      : "text-slate-400 border-transparent hover:text-slate-600"
+                  }`}
+                >
+                  <WifiOff className="w-3.5 h-3.5" />
+                  LocalStorage (เครื่องนี้)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsSupabaseEnabled(true);
+                    safeLocalStorage.setItem("smart_yield_pro_supabase_enabled", "true");
+                    showToast("สลับเป็นโหมด Supabase Cloud", "info");
+                  }}
+                  className={`py-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer border ${
+                    isSupabaseEnabled 
+                      ? "bg-white text-slate-900 border-slate-300 shadow-sm" 
+                      : "text-slate-400 border-transparent hover:text-slate-600"
+                  }`}
+                >
+                  <Wifi className="w-3.5 h-3.5 text-emerald-500" />
+                  Supabase (ระบบคลาวด์)
+                </button>
+              </div>
+
+              {isSupabaseEnabled && (
+                <div className="pt-3 border-t border-slate-200 space-y-3">
+                  <div className="space-y-1.5">
+                    <label className="text-[9px] uppercase font-bold text-slate-400 tracking-wider block font-mono">
+                      Supabase Project URL
+                    </label>
+                    <input
+                      type="text"
+                      value={supabaseConfig.supabaseUrl}
+                      onChange={(e) => {
+                        const newConf = { ...supabaseConfig, supabaseUrl: e.target.value };
+                        setSupabaseConfig(newConf);
+                        safeLocalStorage.setItem("smart_yield_pro_supabase_config", JSON.stringify(newConf));
+                      }}
+                      placeholder="https://your-project.supabase.co"
+                      className="w-full border border-slate-200 focus:border-slate-900 rounded-lg px-2.5 py-1.5 outline-none text-xs font-mono font-semibold text-slate-700 bg-white"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-[9px] uppercase font-bold text-slate-400 tracking-wider block font-mono">
+                      Supabase Anon Key
+                    </label>
+                    <input
+                      type="password"
+                      value={supabaseConfig.supabaseAnonKey}
+                      onChange={(e) => {
+                        const newConf = { ...supabaseConfig, supabaseAnonKey: e.target.value };
+                        setSupabaseConfig(newConf);
+                        safeLocalStorage.setItem("smart_yield_pro_supabase_config", JSON.stringify(newConf));
+                      }}
+                      placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                      className="w-full border border-slate-200 focus:border-slate-900 rounded-lg px-2.5 py-1.5 outline-none text-xs font-mono font-semibold text-slate-700 bg-white"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const success = initSupabaseSafely(supabaseConfig);
+                      if (success) {
+                        setIsSupabaseInitialized(true);
+                        showToast("เชื่อมต่อ Supabase Client สำเร็จ!", "success");
+                      } else {
+                        showToast("โปรดตรวจสอบข้อมูลเชื่อมต่อ Supabase URL & Key", "error");
+                      }
+                    }}
+                    className="w-full py-2 bg-slate-900 text-white rounded-lg text-[10px] font-bold uppercase tracking-wider hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    {isSupabaseInitialized ? "✓ ตรวจสอบการเชื่อมต่อ: ทำงานได้" : "⚡ ทดสอบการเชื่อมต่อ client"}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </motion.div>
+      )}
 
       {/* --- Footer Bento Style --- */}
       <footer className="mt-8 flex justify-between items-center text-[10px] font-bold text-slate-400 uppercase tracking-widest border-t border-slate-200 pt-4"> 
