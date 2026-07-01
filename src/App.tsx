@@ -35,34 +35,8 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
-// --- Firebase Imports ---
-import { initializeApp, getApps, getApp, FirebaseApp } from "firebase/app";
-import { 
-  getAuth, 
-  Auth,
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
-  signOut, 
-  onAuthStateChanged,
-  setPersistence,
-  browserLocalPersistence,
-  User as FirebaseUser
-} from "firebase/auth";
-import { 
-  getFirestore, 
-  Firestore,
-  collection, 
-  doc, 
-  setDoc, 
-  getDocs, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
-  query, 
-  where, 
-  orderBy,
-  onSnapshot
-} from "firebase/firestore";
+// --- Supabase Imports ---
+import { createClient, SupabaseClient, Session as SupabaseSession } from "@supabase/supabase-js";
 
 // --- Memory Fallback Storage ---
 const memoryStorage: Record<string, string> = {};
@@ -95,44 +69,34 @@ const safeLocalStorage = {
   }
 };
 
-// --- Firebase Configuration Type & Default Placeholder ---
-interface FirebaseConfig {
-  apiKey: string;
-  authDomain: string;
-  projectId: string;
-  storageBucket: string;
-  messagingSenderId: string;
-  appId: string;
+// --- Supabase Configuration Type & Default Placeholder ---
+interface SupabaseConfig {
+  supabaseUrl: string;
+  supabaseAnonKey: string;
 }
 
-const DEFAULT_FIREBASE_CONFIG: FirebaseConfig = {
-  apiKey: "",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: ""
+const DEFAULT_SUPABASE_CONFIG: SupabaseConfig = {
+  supabaseUrl: "",
+  supabaseAnonKey: ""
 };
 
-// Global Firebase dynamic instances
-let globalApp: FirebaseApp | null = null;
-let globalAuth: Auth | null = null;
-let globalDb: Firestore | null = null;
+// Global Supabase dynamic instances
+let globalSupabase: SupabaseClient | null = null;
 
-// Helper to initialize Firebase safely
-const initFirebaseSafely = (config: FirebaseConfig): boolean => {
-  if (!config.apiKey || !config.projectId) return false;
+// Helper to initialize Supabase safely
+const initSupabaseSafely = (config: SupabaseConfig): boolean => {
+  if (!config.supabaseUrl || !config.supabaseAnonKey) return false;
   try {
-    if (getApps().length === 0) {
-      globalApp = initializeApp(config);
-    } else {
-      globalApp = getApp();
-    }
-    globalAuth = getAuth(globalApp);
-    globalDb = getFirestore(globalApp);
+    globalSupabase = createClient(config.supabaseUrl, config.supabaseAnonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        storage: safeLocalStorage as any // Use our safe local storage wrapper for session persistence
+      }
+    });
     return true;
   } catch (e) {
-    console.error("Firebase init failed: ", e);
+    console.error("Supabase init failed: ", e);
     return false;
   }
 };
@@ -193,27 +157,27 @@ const formatThaiDate = (dateString: string) => {
 };
 
 export default function App() {
-  // --- Firebase Config state ---
-  const [fbConfig, setFbConfig] = useState<FirebaseConfig>(() => {
-    const saved = safeLocalStorage.getItem("smart_yield_pro_fb_config");
+  // --- Supabase Config state ---
+  const [supabaseConfig, setSupabaseConfig] = useState<SupabaseConfig>(() => {
+    const saved = safeLocalStorage.getItem("smart_yield_pro_supabase_config");
     if (saved) {
       try {
         return JSON.parse(saved);
       } catch (e) {
-        return DEFAULT_FIREBASE_CONFIG;
+        return DEFAULT_SUPABASE_CONFIG;
       }
     }
-    return DEFAULT_FIREBASE_CONFIG;
+    return DEFAULT_SUPABASE_CONFIG;
   });
 
-  const [isFirebaseEnabled, setIsFirebaseEnabled] = useState<boolean>(() => {
-    return safeLocalStorage.getItem("smart_yield_pro_fb_enabled") === "true";
+  const [isSupabaseEnabled, setIsSupabaseEnabled] = useState<boolean>(() => {
+    return safeLocalStorage.getItem("smart_yield_pro_supabase_enabled") === "true";
   });
 
-  const [isFirebaseInitialized, setIsFirebaseInitialized] = useState<boolean>(false);
+  const [isSupabaseInitialized, setIsSupabaseInitialized] = useState<boolean>(false);
   const [showConfigModal, setShowConfigModal] = useState<boolean>(false);
-  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
-  const [isFirebaseSyncing, setIsFirebaseSyncing] = useState<boolean>(false);
+  const [supabaseSession, setSupabaseSession] = useState<SupabaseSession | null>(null);
+  const [isSupabaseSyncing, setIsSupabaseSyncing] = useState<boolean>(false);
 
   // --- Auth States ---
   const [currentUser, setCurrentUser] = useState<string | null>(() => {
@@ -412,76 +376,87 @@ export default function App() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
   const [hoveredBarIndex, setHoveredBarIndex] = useState<number | null>(null);
 
-  // --- Dynamic Firebase Initialization ---
+  // --- Dynamic Supabase Initialization & Session Handler ---
   useEffect(() => {
-    if (isFirebaseEnabled) {
-      const initialized = initFirebaseSafely(fbConfig);
-      setIsFirebaseInitialized(initialized);
-      if (initialized && globalAuth) {
-        // Subscribe to Firebase Auth changes
-        const unsubscribe = onAuthStateChanged(globalAuth, (user) => {
-          setFirebaseUser(user);
-          if (user) {
-            setCurrentUser(user.email ? user.email.split("@")[0] : "firebase_user");
-            safeLocalStorage.setItem("smart_yield_pro_session", user.email ? user.email.split("@")[0] : "firebase_user");
+    if (isSupabaseEnabled) {
+      const initialized = initSupabaseSafely(supabaseConfig);
+      setIsSupabaseInitialized(initialized);
+      if (initialized && globalSupabase) {
+        // Subscribe to Supabase Auth changes
+        globalSupabase.auth.getSession().then(({ data: { session } }) => {
+          setSupabaseSession(session);
+          if (session?.user) {
+            const userStr = session.user.user_metadata?.username || session.user.email?.split("@")[0] || "user";
+            setCurrentUser(userStr);
+            safeLocalStorage.setItem("smart_yield_pro_session", userStr);
           } else {
             setCurrentUser(null);
             safeLocalStorage.removeItem("smart_yield_pro_session");
           }
         });
-        return () => unsubscribe();
+
+        const { data: { subscription } } = globalSupabase.auth.onAuthStateChange((_event, session) => {
+          setSupabaseSession(session);
+          if (session?.user) {
+            const userStr = session.user.user_metadata?.username || session.user.email?.split("@")[0] || "user";
+            setCurrentUser(userStr);
+            safeLocalStorage.setItem("smart_yield_pro_session", userStr);
+          } else {
+            setCurrentUser(null);
+            safeLocalStorage.removeItem("smart_yield_pro_session");
+          }
+        });
+
+        return () => {
+          subscription.unsubscribe();
+        };
       }
     } else {
-      setIsFirebaseInitialized(false);
-      setFirebaseUser(null);
+      setIsSupabaseInitialized(false);
+      setSupabaseSession(null);
     }
-  }, [isFirebaseEnabled, fbConfig]);
+  }, [isSupabaseEnabled, supabaseConfig]);
 
-  // Check if Firebase is genuinely connected and authorized (Force disabled)
-  const isFirebaseActive = false;
+  // Check if Supabase is active
+  const isSupabaseActive = isSupabaseEnabled && isSupabaseInitialized && !!supabaseSession;
 
-  // --- Sync ingredients per logged-in user (Hybrid: Firestore or LocalStorage) ---
+  // Function to fetch ingredients from Supabase
+  const fetchIngredients = async () => {
+    if (isSupabaseActive && globalSupabase && supabaseSession?.user) {
+      setIsSupabaseSyncing(true);
+      const { data, error } = await globalSupabase
+        .from("ingredients")
+        .select("*")
+        .order("date", { ascending: false });
+
+      if (error) {
+        console.error("Supabase select error: ", error);
+        showToast("ไม่สามารถดึงข้อมูลจาก Supabase ได้ในขณะนี้", "error");
+      } else if (data) {
+        const items: Ingredient[] = data.map((d: any) => ({
+          id: d.id,
+          name: d.name,
+          category: d.category,
+          grossWeight: Number(d.gross_weight) || 0,
+          netWeight: Number(d.net_weight) || 0,
+          totalPurchasePrice: Number(d.total_purchase_price) || 0,
+          date: d.date || ""
+        }));
+        setIngredients(items.length > 0 ? items : INITIAL_INGREDIENTS);
+      }
+      setIsSupabaseSyncing(false);
+    }
+  };
+
+  // --- Sync ingredients per logged-in user (Hybrid: Supabase or LocalStorage) ---
   useEffect(() => {
     if (!currentUser) {
       setIngredients([]);
       return;
     }
 
-    if (isFirebaseActive && firebaseUser) {
-      setIsFirebaseSyncing(true);
-      // Query items belonging only to current logged in firebase user UID (User Isolation)
-      const q = query(
-        collection(globalDb!, "ingredients"),
-        where("uid", "==", firebaseUser.uid)
-      );
-
-      const unsubscribe = onSnapshot(q, (snapshot) => {
-        const items: Ingredient[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          items.push({
-            id: docSnap.id,
-            name: data.name || "",
-            category: data.category || "other",
-            grossWeight: Number(data.grossWeight) || 0,
-            netWeight: Number(data.netWeight) || 0,
-            totalPurchasePrice: Number(data.totalPurchasePrice) || 0,
-            date: data.date || ""
-          });
-        });
-        
-        // Sort items by date descending as default snapshot might be unsorted
-        items.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-        
-        setIngredients(items.length > 0 ? items : INITIAL_INGREDIENTS);
-        setIsFirebaseSyncing(false);
-      }, (error) => {
-        console.error("Firestore snapshot error: ", error);
-        showToast("ไม่สามารถซิงค์ข้อมูลกับคลาวด์ได้ในขณะนี้", "error");
-        setIsFirebaseSyncing(false);
-      });
-
-      return () => unsubscribe();
+    if (isSupabaseActive) {
+      fetchIngredients();
     } else {
       // LocalStorage Isolation Mode
       const saved = safeLocalStorage.getItem(`smart_yield_pro_data_${currentUser}`);
@@ -496,28 +471,28 @@ export default function App() {
         setIngredients(INITIAL_INGREDIENTS);
       }
     }
-  }, [currentUser, isFirebaseActive, firebaseUser]);
+  }, [currentUser, isSupabaseActive]);
 
   // Sync back to LocalStorage ONLY in local mode
   useEffect(() => {
-    if (currentUser && !isFirebaseActive) {
+    if (currentUser && !isSupabaseActive) {
       safeLocalStorage.setItem(`smart_yield_pro_data_${currentUser}`, JSON.stringify(ingredients));
     }
-  }, [ingredients, currentUser, isFirebaseActive]);
+  }, [ingredients, currentUser, isSupabaseActive]);
 
-  // --- Dynamic Firebase Config Handler ---
-  const handleSaveFirebaseConfig = (newConfig: FirebaseConfig, enabled: boolean) => {
-    setFbConfig(newConfig);
-    setIsFirebaseEnabled(enabled);
-    safeLocalStorage.setItem("smart_yield_pro_fb_config", JSON.stringify(newConfig));
-    safeLocalStorage.setItem("smart_yield_pro_fb_enabled", enabled ? "true" : "false");
+  // --- Dynamic Supabase Config Handler ---
+  const handleSaveSupabaseConfig = (newConfig: SupabaseConfig, enabled: boolean) => {
+    setSupabaseConfig(newConfig);
+    setIsSupabaseEnabled(enabled);
+    safeLocalStorage.setItem("smart_yield_pro_supabase_config", JSON.stringify(newConfig));
+    safeLocalStorage.setItem("smart_yield_pro_supabase_enabled", enabled ? "true" : "false");
     
     if (enabled) {
-      const success = initFirebaseSafely(newConfig);
+      const success = initSupabaseSafely(newConfig);
       if (success) {
-        showToast("เชื่อมต่อระบบคลาวด์ออนไลน์ Firebase สำเร็จ!", "success");
+        showToast("เชื่อมต่อระบบคลาวด์ออนไลน์ Supabase สำเร็จ!", "success");
       } else {
-        showToast("การเชื่อมต่อ Firebase ล้มเหลว ตรวจสอบข้อมูล Config อีกครั้ง", "error");
+        showToast("การเชื่อมต่อ Supabase ล้มเหลว ตรวจสอบข้อมูล Config อีกครั้ง", "error");
       }
     } else {
       showToast("สลับมาใช้โหมดออฟไลน์ (LocalStorage) เรียบร้อยแล้ว", "info");
@@ -528,8 +503,8 @@ export default function App() {
     setShowConfigModal(false);
   };
 
-  // Helper to format Username into email standard for Firebase
-  const getFirebaseEmail = (userStr: string) => {
+  // Helper to format Username into email standard for Supabase
+  const getSupabaseEmail = (userStr: string) => {
     const cleanUser = userStr.trim();
     if (cleanUser.includes("@")) return cleanUser;
     return `${cleanUser}@smartyield.pro`;
@@ -550,25 +525,28 @@ export default function App() {
       return;
     }
 
-    if (isFirebaseActive) {
+    if (isSupabaseEnabled && isSupabaseInitialized && globalSupabase) {
       try {
-        const email = getFirebaseEmail(username);
-        // Create user in Firebase Cloud
-        await createUserWithEmailAndPassword(globalAuth!, email, password);
-        showToast("ลงทะเบียนระบบคลาวด์สำเร็จ! ยินดีต้อนรับเข้าใช้งาน", "success");
+        const email = getSupabaseEmail(username);
+        // Create user in Supabase Cloud
+        const { data, error } = await globalSupabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              username: username
+            }
+          }
+        });
+
+        if (error) throw error;
+
+        showToast("ลงทะเบียนระบบคลาวด์ Supabase สำเร็จ! กรุณาเข้าสู่ระบบ", "success");
         setAuthMode("login");
         setPasswordInput("");
       } catch (err: any) {
-        console.error("Firebase SignUp error", err);
-        let errorMsg = "สมัครสมาชิกออนไลน์ไม่สำเร็จ";
-        if (err.code === "auth/email-already-in-use") {
-          errorMsg = "ไอดี/อีเมลนี้ถูกสมัครใช้งานไปแล้ว";
-        } else if (err.code === "auth/invalid-email") {
-          errorMsg = "รูปแบบไอดีไม่ถูกต้อง (กรุณาป้อนเฉพาะภาษาอังกฤษหรืออีเมล)";
-        } else if (err.message) {
-          errorMsg = err.message;
-        }
-        showToast(errorMsg, "error");
+        console.error("Supabase SignUp error", err);
+        showToast(err.message || "สมัครสมาชิกออนไลน์ไม่สำเร็จ", "error");
       }
     } else {
       // LocalStorage signup
@@ -610,26 +588,24 @@ export default function App() {
       return;
     }
 
-    if (isFirebaseActive) {
+    if (isSupabaseEnabled && isSupabaseInitialized && globalSupabase) {
       try {
-        const email = getFirebaseEmail(username);
-        await signInWithEmailAndPassword(globalAuth!, email, password);
-        showToast("ล็อกอินออนไลน์เรียบร้อยแล้ว!", "success");
+        const email = getSupabaseEmail(username);
+        const { data, error } = await globalSupabase.auth.signInWithPassword({
+          email,
+          password
+        });
+
+        if (error) throw error;
+
+        showToast("ล็อกอินออนไลน์ผ่าน Supabase เรียบร้อยแล้ว!", "success");
         
         // Clear inputs
         setUsernameInput("");
         setPasswordInput("");
       } catch (err: any) {
-        console.error("Firebase login error", err);
-        let errorMsg = "ไอดี หรือ รหัสผ่าน ไม่ถูกต้อง";
-        if (err.code === "auth/user-not-found" || err.code === "auth/wrong-password") {
-          errorMsg = "ไอดี หรือ รหัสผ่าน ไม่ถูกต้อง";
-        } else if (err.code === "auth/invalid-credential") {
-          errorMsg = "ข้อมูลล็อกอินไม่ถูกต้อง";
-        } else if (err.message) {
-          errorMsg = err.message;
-        }
-        showToast(errorMsg, "error");
+        console.error("Supabase login error", err);
+        showToast(err.message || "ไอดี หรือ รหัสผ่าน ไม่ถูกต้อง", "error");
       }
     } else {
       // LocalStorage login
@@ -663,15 +639,15 @@ export default function App() {
   };
 
   const handleLogout = async () => {
-    if (isFirebaseActive) {
+    if (isSupabaseActive && globalSupabase) {
       try {
-        await signOut(globalAuth!);
-        setFirebaseUser(null);
+        await globalSupabase.auth.signOut();
+        setSupabaseSession(null);
         setCurrentUser(null);
         safeLocalStorage.removeItem("smart_yield_pro_session");
-        showToast("ออกจากระบบออนไลน์เรียบร้อยแล้ว", "info");
+        showToast("ออกจากระบบออนไลน์ Supabase เรียบร้อยแล้ว", "info");
       } catch (err) {
-        console.error("SignOut failed: ", err);
+        console.error("Supabase SignOut failed: ", err);
       }
     } else {
       safeLocalStorage.removeItem("smart_yield_pro_session");
@@ -811,32 +787,41 @@ export default function App() {
       return;
     }
 
-    if (isFirebaseActive && firebaseUser) {
+    if (isSupabaseActive && globalSupabase && supabaseSession?.user) {
       try {
         const itemData = {
           name: trimmedName,
           category,
-          grossWeight: gross,
-          netWeight: net,
-          totalPurchasePrice: purchase,
+          gross_weight: gross,
+          net_weight: net,
+          total_purchase_price: purchase,
           date,
-          uid: firebaseUser.uid
+          user_id: supabaseSession.user.id
         };
 
         if (editingId) {
-          // Update in Firebase Firestore
-          const docRef = doc(globalDb!, "ingredients", editingId);
-          await updateDoc(docRef, itemData);
-          showToast(`อัปเดตข้อมูล "${trimmedName}" บนคลาวด์เรียบร้อยแล้ว`, "success");
+          // Update in Supabase
+          const { error } = await globalSupabase
+            .from("ingredients")
+            .update(itemData)
+            .eq("id", editingId);
+
+          if (error) throw error;
+          showToast(`อัปเดตข้อมูล "${trimmedName}" บน Supabase เรียบร้อยแล้ว`, "success");
           setEditingId(null);
         } else {
-          // Create new in Firebase Firestore
-          await addDoc(collection(globalDb!, "ingredients"), itemData);
-          showToast(`บันทึกวัตถุดิบ "${trimmedName}" ขึ้นคลาวด์เรียบร้อยแล้ว`, "success");
+          // Create new in Supabase
+          const { error } = await globalSupabase
+            .from("ingredients")
+            .insert([itemData]);
+
+          if (error) throw error;
+          showToast(`บันทึกวัตถุดิบ "${trimmedName}" ขึ้น Supabase เรียบร้อยแล้ว`, "success");
         }
+        fetchIngredients(); // reload list
       } catch (err: any) {
-        console.error("Firestore save error: ", err);
-        showToast("ไม่สามารถบันทึกข้อมูลขึ้นคลาวด์ได้ในขณะนี้", "error");
+        console.error("Supabase save error: ", err);
+        showToast(err.message || "ไม่สามารถบันทึกข้อมูลขึ้น Supabase ได้ในขณะนี้", "error");
       }
     } else {
       // LocalStorage Mode
@@ -895,14 +880,19 @@ export default function App() {
     if (deleteId) {
       const target = ingredients.find(item => item.id === deleteId);
       
-      if (isFirebaseActive && firebaseUser) {
+      if (isSupabaseActive && globalSupabase) {
         try {
-          const docRef = doc(globalDb!, "ingredients", deleteId);
-          await deleteDoc(docRef);
-          showToast(`ลบ "${target?.name || 'วัตถุดิบ'}" ออกจากคลาวด์เรียบร้อยแล้ว`, "info");
-        } catch (err) {
-          console.error("Firestore delete error: ", err);
-          showToast("ไม่สามารถลบข้อมูลออกจากคลาวด์ได้ในขณะนี้", "error");
+          const { error } = await globalSupabase
+            .from("ingredients")
+            .delete()
+            .eq("id", deleteId);
+
+          if (error) throw error;
+          showToast(`ลบ "${target?.name || 'วัตถุดิบ'}" ออกจาก Supabase เรียบร้อยแล้ว`, "info");
+          fetchIngredients(); // reload list
+        } catch (err: any) {
+          console.error("Supabase delete error: ", err);
+          showToast(err.message || "ไม่สามารถลบข้อมูลออกจาก Supabase ได้ในขณะนี้", "error");
         }
       } else {
         // LocalStorage Mode
@@ -1151,6 +1141,122 @@ export default function App() {
             <p className="text-slate-400 text-[11px] font-medium uppercase tracking-widest mt-1">
               Yield & Cost Tracker
             </p>
+          </div>
+
+          {/* Storage Connection Switcher */}
+          <div className="mb-6 p-4 bg-slate-50 border border-slate-200 rounded-2xl">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] uppercase font-black text-slate-500 tracking-wider flex items-center gap-1.5">
+                <Database className="w-3.5 h-3.5 text-blue-500" />
+                โหมดการจัดเก็บข้อมูล
+              </span>
+              <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded font-mono ${
+                isSupabaseEnabled 
+                  ? "bg-emerald-50 text-emerald-700 border border-emerald-100" 
+                  : "bg-slate-200 text-slate-600"
+              }`}>
+                {isSupabaseEnabled ? "SUPABASE ONLINE" : "LOCAL STORAGE"}
+              </span>
+            </div>
+            <p className="text-[10px] text-slate-400 mb-3 leading-relaxed font-semibold">
+              เลือกจัดเก็บข้อมูลออฟไลน์ในเครื่อง หรือซิงค์ขึ้นคลาวด์แบบ Realtime ด้วย Supabase
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSupabaseEnabled(false);
+                  safeLocalStorage.setItem("smart_yield_pro_supabase_enabled", "false");
+                  showToast("สลับเป็นโหมดออฟไลน์ (LocalStorage)", "info");
+                }}
+                className={`py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer border ${
+                  !isSupabaseEnabled 
+                    ? "bg-white text-slate-900 border-slate-300 shadow-xs" 
+                    : "text-slate-400 border-transparent hover:text-slate-600"
+                }`}
+              >
+                <WifiOff className="w-3.5 h-3.5" />
+                LocalStorage
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSupabaseEnabled(true);
+                  safeLocalStorage.setItem("smart_yield_pro_supabase_enabled", "true");
+                  showToast("สลับเป็นโหมด Supabase Cloud (กรุณาตั้งค่า)", "info");
+                }}
+                className={`py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer border ${
+                  isSupabaseEnabled 
+                    ? "bg-white text-slate-900 border-slate-300 shadow-xs" 
+                    : "text-slate-400 border-transparent hover:text-slate-600"
+                }`}
+              >
+                <Wifi className="w-3.5 h-3.5 text-emerald-500" />
+                Supabase Cloud
+              </button>
+            </div>
+
+            {/* Supabase Config Inputs if enabled */}
+            <AnimatePresence>
+              {isSupabaseEnabled && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="mt-4 pt-4 border-t border-slate-200 space-y-3 overflow-hidden"
+                >
+                  <div className="space-y-1.5">
+                    <label className="text-[9px] uppercase font-bold text-slate-400 tracking-wider block">
+                      Supabase Project URL
+                    </label>
+                    <input
+                      type="text"
+                      value={supabaseConfig.supabaseUrl}
+                      onChange={(e) => {
+                        const newConf = { ...supabaseConfig, supabaseUrl: e.target.value };
+                        setSupabaseConfig(newConf);
+                        safeLocalStorage.setItem("smart_yield_pro_supabase_config", JSON.stringify(newConf));
+                      }}
+                      placeholder="https://your-project.supabase.co"
+                      className="w-full border border-slate-200 focus:border-slate-900 rounded-lg px-2.5 py-1.5 outline-none text-xs font-mono font-semibold text-slate-700 bg-white"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-[9px] uppercase font-bold text-slate-400 tracking-wider block">
+                      Supabase Anon Public API Key
+                    </label>
+                    <input
+                      type="password"
+                      value={supabaseConfig.supabaseAnonKey}
+                      onChange={(e) => {
+                        const newConf = { ...supabaseConfig, supabaseAnonKey: e.target.value };
+                        setSupabaseConfig(newConf);
+                        safeLocalStorage.setItem("smart_yield_pro_supabase_config", JSON.stringify(newConf));
+                      }}
+                      placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                      className="w-full border border-slate-200 focus:border-slate-900 rounded-lg px-2.5 py-1.5 outline-none text-xs font-mono font-semibold text-slate-700 bg-white"
+                    />
+                  </div>
+                  
+                  {/* Quick Connection check */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const success = initSupabaseSafely(supabaseConfig);
+                      if (success) {
+                        setIsSupabaseInitialized(true);
+                        showToast("เชื่อมต่อ Supabase Client สำเร็จ!", "success");
+                      } else {
+                        showToast("โปรดตรวจสอบข้อมูลเชื่อมต่อ Supabase URL & Key", "error");
+                      }
+                    }}
+                    className="w-full py-1.5 bg-slate-900 text-white rounded-lg text-[10px] font-bold uppercase tracking-wider hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    {isSupabaseInitialized ? "✓ เชื่อมต่อสำเร็จ" : "⚡ ทดสอบการเชื่อมต่อ client"}
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
 
           {/* Toggle Tabs */}
