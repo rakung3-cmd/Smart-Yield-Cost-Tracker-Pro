@@ -1,0 +1,64 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global Safety Net: Default Deny All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helper Functions ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Comprehensive Schema, Type, Range, and Logic Validator
+    function isValidIngredient(data) {
+      return data.keys().hasAll(['name', 'category', 'grossWeight', 'netWeight', 'totalPurchasePrice', 'date', 'uid'])
+        && data.keys().size() == 7
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 128
+        && data.category is string && data.category in ['meat', 'seafood', 'vegetables', 'fruits', 'bakery', 'dry', 'other']
+        && data.grossWeight is number && data.grossWeight > 0 && data.grossWeight <= 1000000
+        && data.netWeight is number && data.netWeight > 0 && data.netWeight <= data.grossWeight
+        && data.totalPurchasePrice is number && data.totalPurchasePrice >= 0 && data.totalPurchasePrice <= 10000000
+        && data.date is string && data.date.size() == 10 && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && data.uid is string && data.uid == request.auth.uid;
+    }
+
+    // --- Ingredients Collection Rules ---
+    match /ingredients/{ingredientId} {
+      
+      // Get: Must own the ingredient
+      allow get: if isSignedIn() && existing().uid == request.auth.uid;
+
+      // List: Ensure queries must be filtered by the user's UID (Query Enforcer)
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+
+      // Create: Validate everything, including document ID and fields
+      allow create: if isSignedIn() 
+        && isValidId(ingredientId) 
+        && isValidIngredient(incoming());
+
+      // Update: Validate schema, keep UID immutable, and define exact modifiable keys
+      allow update: if isSignedIn()
+        && isValidIngredient(incoming())
+        && incoming().uid == existing().uid
+        && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'category', 'grossWeight', 'netWeight', 'totalPurchasePrice', 'date']);
+
+      // Delete: Must own the ingredient
+      allow delete: if isSignedIn() && existing().uid == request.auth.uid;
+    }
+  }
+}

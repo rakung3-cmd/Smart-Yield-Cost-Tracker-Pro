@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "Ingredient": {
+      "title": "Ingredient",
+      "description": "An ingredient item tracked by weight, cost, and yield",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The name of the ingredient"
+        },
+        "category": {
+          "type": "string",
+          "description": "Category of the ingredient (e.g., meat, seafood, dry)"
+        },
+        "grossWeight": {
+          "type": "number",
+          "description": "The raw gross weight in kilograms"
+        },
+        "netWeight": {
+          "type": "number",
+          "description": "The edible net weight in kilograms"
+        },
+        "totalPurchasePrice": {
+          "type": "number",
+          "description": "Total purchase price paid in Thai Baht"
+        },
+        "date": {
+          "type": "string",
+          "description": "Recording date in YYYY-MM-DD format"
+        },
+        "uid": {
+          "type": "string",
+          "description": "Owner user UID for user isolation"
+        }
+      },
+      "required": ["name", "category", "grossWeight", "netWeight", "totalPurchasePrice", "date", "uid"]
+    }
+  },
+  "firestore": {
+    "ingredients": {
+      "schema": "Ingredient",
+      "description": "Collection of ingredients belonging to different users"
+    }
+  }
+}

@@ -61,8 +61,10 @@ import {
   query, 
   where, 
   orderBy,
-  onSnapshot
+  onSnapshot,
+  getDocFromServer
 } from "firebase/firestore";
+import firebaseConfigImport from "../firebase-applet-config.json";
 
 // --- Memory Fallback Storage ---
 const memoryStorage: Record<string, string> = {};
@@ -103,21 +105,71 @@ interface FirebaseConfig {
   storageBucket: string;
   messagingSenderId: string;
   appId: string;
+  firestoreDatabaseId?: string;
 }
 
 const DEFAULT_FIREBASE_CONFIG: FirebaseConfig = {
-  apiKey: "",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: ""
+  apiKey: firebaseConfigImport.apiKey || "",
+  authDomain: firebaseConfigImport.authDomain || "",
+  projectId: firebaseConfigImport.projectId || "",
+  storageBucket: firebaseConfigImport.storageBucket || "",
+  messagingSenderId: firebaseConfigImport.messagingSenderId || "",
+  appId: firebaseConfigImport.appId || "",
+  firestoreDatabaseId: firebaseConfigImport.firestoreDatabaseId || ""
 };
+
+// --- Firestore Error Handling conforming to Firebase-Integration Skill ---
+enum OperationType {
+  CREATE = "create",
+  UPDATE = "update",
+  DELETE = "delete",
+  LIST = "list",
+  GET = "get",
+  WRITE = "write",
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
 
 // Global Firebase dynamic instances
 let globalApp: FirebaseApp | null = null;
 let globalAuth: Auth | null = null;
 let globalDb: Firestore | null = null;
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: globalAuth?.currentUser?.uid || null,
+      email: globalAuth?.currentUser?.email || null,
+      emailVerified: globalAuth?.currentUser?.emailVerified || null,
+      isAnonymous: globalAuth?.currentUser?.isAnonymous || null,
+      tenantId: globalAuth?.currentUser?.tenantId || null,
+      providerInfo: globalAuth?.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error("Firestore Error: ", JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 // Helper to initialize Firebase safely
 const initFirebaseSafely = (config: FirebaseConfig): boolean => {
@@ -129,7 +181,20 @@ const initFirebaseSafely = (config: FirebaseConfig): boolean => {
       globalApp = getApp();
     }
     globalAuth = getAuth(globalApp);
-    globalDb = getFirestore(globalApp);
+    globalDb = getFirestore(globalApp, config.firestoreDatabaseId || undefined);
+
+    // Validate Connection to Firestore on Boot
+    const testConnection = async () => {
+      try {
+        await getDocFromServer(doc(globalDb!, "test", "connection"));
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("the client is offline")) {
+          console.error("Please check your Firebase configuration.");
+        }
+      }
+    };
+    testConnection();
+
     return true;
   } catch (e) {
     console.error("Firebase init failed: ", e);
@@ -207,7 +272,9 @@ export default function App() {
   });
 
   const [isFirebaseEnabled, setIsFirebaseEnabled] = useState<boolean>(() => {
-    return safeLocalStorage.getItem("smart_yield_pro_fb_enabled") === "true";
+    const saved = safeLocalStorage.getItem("smart_yield_pro_fb_enabled");
+    if (saved === "false") return false;
+    return !!DEFAULT_FIREBASE_CONFIG.apiKey;
   });
 
   const [isFirebaseInitialized, setIsFirebaseInitialized] = useState<boolean>(false);
@@ -479,6 +546,7 @@ export default function App() {
         console.error("Firestore snapshot error: ", error);
         showToast("ไม่สามารถซิงค์ข้อมูลกับคลาวด์ได้ในขณะนี้", "error");
         setIsFirebaseSyncing(false);
+        handleFirestoreError(error, OperationType.LIST, "ingredients");
       });
 
       return () => unsubscribe();
@@ -837,6 +905,7 @@ export default function App() {
       } catch (err: any) {
         console.error("Firestore save error: ", err);
         showToast("ไม่สามารถบันทึกข้อมูลขึ้นคลาวด์ได้ในขณะนี้", "error");
+        handleFirestoreError(err, editingId ? OperationType.UPDATE : OperationType.CREATE, editingId ? `ingredients/${editingId}` : "ingredients");
       }
     } else {
       // LocalStorage Mode
@@ -903,6 +972,7 @@ export default function App() {
         } catch (err) {
           console.error("Firestore delete error: ", err);
           showToast("ไม่สามารถลบข้อมูลออกจากคลาวด์ได้ในขณะนี้", "error");
+          handleFirestoreError(err, OperationType.DELETE, `ingredients/${deleteId}`);
         }
       } else {
         // LocalStorage Mode
