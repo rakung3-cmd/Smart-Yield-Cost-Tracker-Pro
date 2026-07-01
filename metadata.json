@@ -1,0 +1,6 @@
+{
+  "name": "Smart Yield & Cost Tracker Pro",
+  "description": "แอปพลิเคชันคำนวณ Yield และต้นทุนวัตถุดิบจริงสำหรับร้านอาหารและธุรกิจเบเกอรี่",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
